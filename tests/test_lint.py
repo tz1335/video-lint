@@ -196,3 +196,37 @@ def test_sfx_buried_under_music_by_stem(tmp_path, sfx_gain, expect):
     assert r['by']['audio.sfx']['level'] == expect
     # 配乐是随机噪声，和音效有一点偶然相关；音效很轻时增益估计会差零点零几
     assert r['by']['audio.sfx']['data']['gain'] == pytest.approx(sfx_gain, rel=0.1, abs=0.02)
+
+
+# —— OCR 兜底（没装 rapidocr-onnxruntime 就跳过）——
+
+def _has_ocr():
+    try:
+        import rapidocr_onnxruntime  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@pytest.mark.skipif(not _has_ocr(), reason='没装 rapidocr-onnxruntime')
+@pytest.mark.parametrize('y0,expect', [(0.83, 'fail'), (0.40, 'pass')])
+def test_ocr_finds_text_without_text_layer(tmp_path, y0, expect):
+    from PIL import ImageDraw, ImageFont
+    w, h = 540, 960
+    im = Image.new('RGB', (w, h), (30, 30, 34))
+    d = ImageDraw.Draw(im)
+    font = ImageFont.load_default(size=48)
+    d.text((60, int(y0 * h)), 'HELLO 2026', fill=(250, 250, 250), font=font)
+    im.save(tmp_path / 'still.png')
+    ffmpeg('-loop', '1', '-i', str(tmp_path / 'still.png'), '-f', 'lavfi', '-i', f"aevalsrc='{TONE}':s=48000:d=3", '-t', '3', '-r', str(FPS),
+           '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', str(tmp_path / 'v.mp4'))
+    r = lint_report(tmp_path / 'v.mp4', tmp_path / 'out', '--platform', 'douyin')
+    assert r['by']['text.zones']['level'] == expect
+    assert 'OCR' in r['by']['text.zones']['detail']
+    assert r['features']['frame0MaxText'] > 0.03
+
+
+def test_no_ocr_flag_falls_back_to_info(tmp_path):
+    v = make_video(tmp_path / 'v.mp4', MOVING, w=180, h=320, seconds=2, audio=TONE)
+    r = lint_report(v, tmp_path / 'out', '--no-ocr')
+    assert r['by']['text']['level'] == 'info'

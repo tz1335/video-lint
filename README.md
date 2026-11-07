@@ -18,9 +18,9 @@ python -I lint.py final.mp4
 python -I lint.py final.mp4 --sidecar examples/sidecar.example.json --platform tiktok --strict
 ```
 
-Requires `ffmpeg` / `ffprobe` on PATH. See `SKILL.md` for the full option list, the sidecar format, and how to read `report.json`. `SKILL.md` follows the Agent Skills format, so this folder can be dropped into any agent that supports skills.
+Requires `ffmpeg` / `ffprobe` on PATH. For the text checks on any video, also `pip install rapidocr-onnxruntime`: without a text layer, video-lint finds text with OCR (it can miss tiny, stylised or low-contrast text, so "no text on frame 0" from OCR is only a warning). See `SKILL.md` for the full option list, the sidecar format, and how to read `report.json`. `SKILL.md` follows the Agent Skills format, so this folder can be dropped into any agent that supports skills.
 
-需要 `ffmpeg` / `ffprobe` 在 PATH 里。完整参数、旁注（sidecar）格式、`report.json` 怎么读，见 `SKILL.md`。`SKILL.md` 按 Agent Skills 格式写，所以整个目录可以直接放进任何支持 skill 的 agent 里用。`librosa` 是可选的，只在没有旁注拍子网格、要从音频估拍子时用到。
+需要 `ffmpeg` / `ffprobe` 在 PATH 里。想对任何视频做文字检查，再装 `pip install rapidocr-onnxruntime`：没有文字层时 video-lint 会用 OCR 找字（很小、艺术字、低对比的字可能漏掉，所以 OCR 判出的「第 0 帧没有字」只给 ⚠）。完整参数、旁注（sidecar）格式、`report.json` 怎么读，见 `SKILL.md`。`SKILL.md` 按 Agent Skills 格式写，所以整个目录可以直接放进任何支持 skill 的 agent 里用。`librosa` 是可选的，只在没有旁注拍子网格、要从音频估拍子时用到。
 
 ## Tests · 测试
 
@@ -44,7 +44,7 @@ The tests synthesise small videos with known answers using ffmpeg (a black first
 | Cut on beat · 硬切卡拍 | hard cuts more than ±1.5 frames off the grid ⚠ / ✗<br>硬切离拍点超过 ±1.5 帧 ⚠ / ✗ |
 | Loudness · 响度 | true peak > −1 dBFS ⚠, > 0 ✗; integrated LUFS only when `--lufs` is given<br>真峰值高于 −1 dBFS ⚠、高于 0 ✗；给了 `--lufs` 才判整片响度 |
 | Sound effects · 音效 | full-band or 1.2–5 kHz rise over the moment before; or, with a stem, effect-to-music ratio<br>比前一刻高出多少（全频或 1.2–5 kHz）；有音效分轨时改用音效和配乐的能量比 |
-| Text (with text layer) · 文字（需要文字层） | glyphs under a platform UI zone ✗ / ⚠; text touching the frame edge ⚠; text size recorded<br>字被平台界面挡住 ✗ / ⚠；文字贴边 ⚠；字高只记录 |
+| Text · 文字 | glyphs under a platform UI zone ✗ / ⚠; text touching the frame edge ⚠; text size recorded. Text boxes come from a text layer (`--text-dir`) or, without one, from OCR (`pip install rapidocr-onnxruntime`, any OS)<br>字被平台界面挡住 ✗ / ⚠；文字贴边 ⚠；字高只记录。文字框来自文字层（`--text-dir`），没有文字层时用 OCR 自动找（`pip install rapidocr-onnxruntime`，Windows / Mac / Linux 都能用） |
 | Opening rules · 开头规则 | frame 0 has text big enough to read; a hook in the top half (portrait); a number within 8 s<br>第 0 帧有够大的字；竖屏上半屏有钩子；8 秒内出现数字 |
 
 ## Platforms · 平台

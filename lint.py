@@ -159,6 +159,39 @@ def text_boxes(text_dir, video, out):
     return boxes
 
 
+OCR_SHRINK = 0.74  # OCR 检测框比字形高一截（文字检测会把框往外扩），按中心收到约字高，和文字层的量法对齐（ep53 上 67 行对照：OCR 框高中位数是字高的 1.36 倍）
+
+
+def ocr_engine():
+    """有 RapidOCR 就返回识别器，没装返回 None（pip install rapidocr-onnxruntime）"""
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+    except ImportError:
+        return None
+    return RapidOCR()
+
+
+def ocr_boxes(engine, video, frames, out, max_w=960):
+    """没有文字层时用 OCR 在这些帧上找文字行，返回和 text_boxes 一样的行框（0–1 坐标）。
+    只认置信度 ≥ 0.5、含字母数字或汉字的行；画面里的图形偶尔会被当成字，结果只当兜底。"""
+    P = probe(video)
+    tw = min(P['width'], max_w)
+    ims = extract_frames(video, frames, tw, out)
+    boxes = {}
+    for f, im in ims.items():
+        W, H = im.size
+        result, _ = engine(np.asarray(im)[:, :, ::-1].copy())
+        lines = []
+        for poly, text, score in result or []:
+            if float(score) < 0.5 or not re.search(r'[0-9A-Za-z一-鿿]', text):
+                continue
+            xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+            cy, hh = (min(ys) + max(ys)) / 2, (max(ys) - min(ys)) * OCR_SHRINK / 2
+            lines.append([round(max(0, min(xs)) / W, 4), round(max(0, cy - hh) / H, 4), round(min(W, max(xs)) / W, 4), round(min(H, cy + hh) / H, 4)])
+        boxes[f] = merge_lines(lines)
+    return boxes
+
+
 def merge_lines(found):
     """同一行（纵向重叠超过较矮那块的一半）的几块合成一个行框：字间距大的时候一行会被拆成几段"""
     lines = []
@@ -173,7 +206,7 @@ def merge_lines(found):
     return sorted(lines, key=lambda b: (b[1], b[0]))
 
 
-def text_checks(r, boxes, zones, sc, fps, aspect):
+def text_checks(r, boxes, zones, sc, fps, aspect, source='文字层（Remotion 渲的品红文字）'):
     """文字框进遮挡区、贴边出画、字高。aspect = 宽 / 高。
     至少盖住一个字（横向重叠 ≥ 0.8 个字高、纵向重叠 ≥ 半个字高）判 ✗；只擦到边（重叠占框面积 ≥ 10%）判 ⚠"""
     caps = sc.get('captions') or []
@@ -205,7 +238,7 @@ def text_checks(r, boxes, zones, sc, fps, aspect):
             parts = [f'{sum(1 for c, n2, _ in hs if n2 == name and c)} 行盖住、{sum(1 for c, n2, _ in hs if n2 == name and not c)} 行擦边「{name}」'.replace('0 行盖住、', '').replace('、0 行擦边', '') for name in dict.fromkeys(n for _, n, _ in hs)]
             rows.append(f'  - {"✗" if any(c for c, _, _ in hs) else "⚠"} 第 {f} 帧（{f / fps:.2f} 秒）：' + '；'.join(parts) + (f'。字幕「{said(f)}」' if said(f) else ''))
         r.add('text.zones', lv, f'文字进{zones["name"]}遮挡区：{len({h[2] for h in bad})} 帧有字被盖住、{len(by_frame) - len({h[2] for h in bad})} 帧只擦边' if hits else f'文字都没进{zones["name"]}遮挡区',
-              f'查了 {len(boxes)} 帧的文字层（Remotion 渲的品红文字），联系表上青框是识别出的文字行；「盖住」= 至少一个字在区里。' + ('\n' + '\n'.join(rows) if rows else ''),
+              f'查了 {len(boxes)} 帧的{source}，联系表上青框是识别出的文字行；「盖住」= 至少一个字在区里。' + ('\n' + '\n'.join(rows) if rows else ''),
               [{'frame': f, 'zone': name, 'covered': c, 'overlap': round(k, 3), 'box': b} for c, k, f, name, b in hits])
     r.add('text.edge', 'warn' if edges else 'pass', f'有 {len(edges)} 行文字贴边，可能出画' if edges else '文字都没贴边', '\n'.join(f'  - {e}' for e in edges[:20]))
     if heights:
@@ -222,7 +255,7 @@ _RULES_DOC = 'materials/00-公共/选题脚本/00-爆款结构-抖腿.md'
 RULES = f'{_RULES_DOC}「前 2 秒」' if (ROOT / _RULES_DOC).exists() else '「前 2 秒」规则'
 
 
-def opening_rules(r, sc, boxes, bright, fps, n, P):
+def opening_rules(r, sc, boxes, bright, fps, n, P, from_ocr=False):
     """「前 2 秒」硬规则里能机器判断的几条（来自 ep52 的教训，见 RULES）。字的大小按「字高 ÷ 视频宽」算：
     手机上横竖屏的视频都是撑满屏宽，这样两种画幅能放在一起比。"""
     W, H = P['width'], P['height']
@@ -245,7 +278,8 @@ def opening_rules(r, sc, boxes, bright, fps, n, P):
         b1 = boxes.get(next((f for f in sorted(boxes) if f >= fps), -1), [])
         if not b0:
             first = next((f for f in sorted(boxes) if boxes[f]), None)
-            rows.append((2, 'fail', '第 0 帧没有字', f'第一行字出现在第 {first} 帧（{first / fps:.2f} 秒）' if first is not None else '前 2 秒都没有字'))
+            # 文字框来自 OCR 时只判 ⚠：OCR 可能漏掉小字、艺术字、低对比的字
+            rows.append((2, 'warn' if from_ocr else 'fail', '第 0 帧没有字' + ('（OCR 没找到）' if from_ocr else ''), f'第一行字出现在第 {first} 帧（{first / fps:.2f} 秒）' if first is not None else '前 2 秒都没有字'))
         else:
             big = max(b0, key=size)
             same = [b for b in b1 if min(b[3], big[3]) - max(b[1], big[1]) > 0.5 * (big[3] - big[1])]
@@ -525,6 +559,7 @@ def main():
     ap.add_argument('--platform', choices=['douyin', 'tiktok', 'reels', 'shorts', 'none'], help='竖屏联系表叠哪个平台的界面，默认取旁注的 platform（没有就是 douyin）')
     ap.add_argument('--sfx-audio', help='只有音效的分轨（wav，或者「无配乐仅音效」版 mp4）；有它就用音效 / 配乐能量比判断听不听得见')
     ap.add_argument('--text-dir',help='文字层 PNG 目录（textlayer.mjs 的输出），有它才自动查遮挡区和出画')
+    ap.add_argument('--no-ocr', action='store_true', help='没有文字层时也不用 OCR 找字')
     ap.add_argument('--text-failed', help='（run.mjs 用）文字层渲染失败的原因')
     ap.add_argument('--frames', help='另外抽这几帧拼成 frames.jpg（每行 4 格），看动画过程用：120,135=中段,150')
     a = ap.parse_args()
@@ -717,14 +752,19 @@ def main():
             f, _, name = item.strip().partition('=')
             extra.append((min(n - 1, max(0, int(f))), name))
     want = [f for f, _ in picks] + [f for _, _, fs in hit_tiles for f in fs if 0 <= f < n] + [f for f, _ in extra]
-    boxes = {}
+    boxes, boxes_from_ocr = {}, False
     if a.text_dir and (Path(a.text_dir) / 'frames.json').exists():
         boxes = text_boxes(a.text_dir, video, out)
         text_checks(r, boxes, zones, sc, fps, P['width'] / P['height'])
     elif a.text_failed:
         r.add('text', 'skip', '文字层没渲出来，遮挡区和出画没法自动查', a.text_failed)
+    elif not a.no_ocr and (engine := ocr_engine()) is not None:
+        # 没有文字层：用 OCR 在联系表那些帧和前 2 秒五帧上找字
+        frames = sorted({f for f, _ in picks} | {min(n - 1, round(s * fps) - (1 if s == 2 else 0)) for s in (0, 0.5, 1, 1.5, 2)} | {f for f, _ in extra})
+        boxes, boxes_from_ocr = ocr_boxes(engine, video, frames, out), True
+        text_checks(r, boxes, zones, sc, fps, P['width'] / P['height'], source='画面 OCR（RapidOCR，小字、艺术字、低对比的字可能漏掉，图形偶尔被当成字）')
     else:
-        r.add('text', 'info', '没有文字位置数据，遮挡区只画框给人看', '这一工程里用 run.mjs 会自动渲文字层；别的视频要接 OCR 或手写文字框')
+        r.add('text', 'info', '没有文字位置数据，遮挡区只画框给人看', '装上 rapidocr-onnxruntime 会自动用 OCR 找字；也可以传 --text-dir（所有文字渲成纯品红的同帧 PNG）')
     ims = extract_frames(video, want, tile_w, out)
     tiles = [label(ims[f], f'{name} f{f} {f / fps:.2f}s', zones, boxes.get(f)) for f, name in picks if f in ims]
     sheets = []
@@ -743,7 +783,7 @@ def main():
         images['frames'] = str(out / 'frames.jpg')
     if sc.get('performance'):
         retention_check(r, sc['performance'], sc, fps, n)
-    open_feat = opening_rules(r, sc, boxes, bright, fps, n, P)
+    open_feat = opening_rules(r, sc, boxes, bright, fps, n, P, from_ocr=boxes_from_ocr)
     # 第 0 帧原尺寸单独存一张：在信息流里刷到时看到的就是它（开头规则 6）
     extract_frames(video, [0], P['width'], out)[0].save(out / 'frame0.jpg', quality=90)
     images['frame0'] = str(out / 'frame0.jpg')

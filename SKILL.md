@@ -56,7 +56,8 @@ A sidecar JSON unlocks the timing checks. Times are in **frames**, the beat grid
 - `beats` → cut-on-beat check (±1.5 frames); without it the grid is estimated from audio and can only warn
 - `sfx` + `--loud name1,name2` → is each sound effect louder than the moment before it
 - `--sfx-audio sfx-only.wav` → measures each effect against the music from a stem instead (much more reliable)
-- `--text-dir` → PNGs of the same frames with all text painted pure magenta `#ff00ff`; enables "text inside UI zones" and "text off frame". Without it the zones are only drawn for a human to look at.
+- `--text-dir` → PNGs of the same frames with all text painted pure magenta `#ff00ff`; the most precise source for "text inside UI zones", "text off frame" and text size
+- without `--text-dir`, if `rapidocr-onnxruntime` is installed, text is found with OCR on the same frames (boxes shrunk to glyph height; may miss tiny or stylised text). `--no-ocr` turns this off; with neither, the zones are only drawn for a human to look at
 
 ## Thresholds worth knowing
 
