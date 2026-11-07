@@ -691,7 +691,7 @@ def main():
             lv = ('warn' if weak else 'pass') if a.loud else 'info'
             r.add('audio.sfx', lv, f'要听得见的音效：{checked - len(weak)} / {checked} 处比前一刻明显高出' + ('' if a.loud else '（默认清单，仅供参考）'),
                   '标准：全频高出 ≥ 4 dB，或 1.2–5 kHz 高出 ≥ 6 dB。' +('偏弱的（加音量，或挪开前面的音效）：\n' + '\n'.join(f'  - {w["name"]} @ {w["frame"] / fps:.2f} 秒（音量 {w["volume"]}）：全频 {w["rise"]:+} dB，1.2–5 kHz {w["riseHi"]:+} dB' for w in weak) if weak else ''), weak)
-        elif sc.get('sfx'):
+        elif sc.get('sfx') and not a.sfx_audio:  # 用了分轨就由 sfx_stem_check 出结论，这里不再补一条同 id 的
             r.add('audio.sfx', 'info', '旁注里有音效，但没有一个名字匹配「要听得见」的清单', f'当前清单：{",".join(names)}；用 --loud 指定')
     else:
         r.add('audio', 'skip', '没有音轨，响度和音效没法查', '查的如果是静音版，换带配乐的成片再跑')

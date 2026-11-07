@@ -1,5 +1,7 @@
 # video-lint
 
+[![tests](https://github.com/tz1335/video-lint/actions/workflows/ci.yml/badge.svg)](https://github.com/tz1335/video-lint/actions/workflows/ci.yml)
+
 **Deterministic QA for finished short videos.** Point it at an mp4 and it checks the first frame and first two seconds, black and frozen stretches, text under TikTok / Reels / Shorts UI zones, cut-on-beat timing, loudness, and whether sound effects are buried under the music. It writes a human report, a JSON report for agents, and contact sheets. No model calls: same input, same answer.
 
 **短视频成片质检，规则全是确定性的。** 给它一个 mp4，它会查第 0 帧和前 2 秒、黑场和静止画面、字幕有没有被抖音（TikTok）/ Reels / Shorts 的界面挡住、硬切卡不卡拍、响度，以及音效有没有被配乐盖住。输出给人看的报告、给 agent 读的 JSON 报告和联系表。不调用任何模型：同样的输入，永远得到同样的结论。
@@ -19,6 +21,17 @@ python -I lint.py final.mp4 --sidecar examples/sidecar.example.json --platform t
 Requires `ffmpeg` / `ffprobe` on PATH. See `SKILL.md` for the full option list, the sidecar format, and how to read `report.json`. `SKILL.md` follows the Agent Skills format, so this folder can be dropped into any agent that supports skills.
 
 需要 `ffmpeg` / `ffprobe` 在 PATH 里。完整参数、旁注（sidecar）格式、`report.json` 怎么读，见 `SKILL.md`。`SKILL.md` 按 Agent Skills 格式写，所以整个目录可以直接放进任何支持 skill 的 agent 里用。`librosa` 是可选的，只在没有旁注拍子网格、要从音频估拍子时用到。
+
+## Tests · 测试
+
+```bash
+pip install pytest
+python -m pytest tests -q
+```
+
+The tests synthesise small videos with known answers using ffmpeg (a black first frame, a cut 2 frames off the beat, a darken → freeze → burst hit, text inside the Douyin caption zone, a sound effect buried under noise) and check that `report.json` says exactly that. CI runs them on Ubuntu (Python 3.10, 3.12) and Windows on every push.
+
+测试用 ffmpeg 现场合成已知答案的小视频（第 0 帧黑屏、偏离拍点 2 帧的硬切、收暗 → 静止 → 爆亮的爆点、落在抖音文案区里的字、被噪声盖住的音效），核对 `report.json` 的结论和预期完全一致。每次推送都会在 Ubuntu（Python 3.10、3.12）和 Windows 上自动跑一遍。
 
 ## What it checks · 查什么
 
