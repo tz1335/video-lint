@@ -1,0 +1,41 @@
+{
+ "source": "https://github.com/reelsmith/safezone （zones.js，MIT 许可，© 2026 reelsmith，许可全文见 THIRD_PARTY.md）",
+ "note": "竖屏 9:16 播放器界面的遮挡区，单位是画面宽高的百分比（x, y, w, h，从左上角量）。原作者说明：iOS 和安卓在现代长屏手机上的保守平均值，平台没有公开官方像素规格。抖音没有单独数据，界面布局和 TikTok 相同，先沿用 TikTok 的数字。",
+ "platforms": {
+  "tiktok": {
+   "name": "TikTok",
+   "updated": "2026-09",
+   "zones": [
+    {"id": "top", "label": "顶栏（推荐 / 搜索）", "x": 0, "y": 0, "w": 100, "h": 8},
+    {"id": "rail", "label": "右侧按钮", "x": 86.5, "y": 40, "w": 13.5, "h": 47},
+    {"id": "caption", "label": "作者名、文案、音乐", "x": 0, "y": 76, "w": 86.5, "h": 16},
+    {"id": "nav", "label": "底部导航", "x": 0, "y": 92, "w": 100, "h": 8}
+   ],
+   "safe": {"x": 5.5, "y": 8, "w": 80, "h": 67}
+  },
+  "douyin": {"sameAs": "tiktok", "name": "抖音（沿用 TikTok 数据）"},
+  "reels": {
+   "name": "Instagram Reels",
+   "updated": "2026-09",
+   "notes": "Meta 另外建议广告位留出顶部约 14%",
+   "zones": [
+    {"id": "top", "label": "顶栏", "x": 0, "y": 0, "w": 100, "h": 8},
+    {"id": "rail", "label": "右侧按钮", "x": 86, "y": 52, "w": 14, "h": 38},
+    {"id": "caption", "label": "作者名、文案、音频", "x": 0, "y": 76, "w": 86, "h": 16},
+    {"id": "nav", "label": "底部导航", "x": 0, "y": 92, "w": 100, "h": 8}
+   ],
+   "safe": {"x": 6, "y": 10, "w": 78, "h": 62}
+  },
+  "shorts": {
+   "name": "YouTube Shorts",
+   "updated": "2026-09",
+   "zones": [
+    {"id": "top", "label": "顶栏", "x": 0, "y": 0, "w": 100, "h": 8},
+    {"id": "rail", "label": "右侧按钮", "x": 85, "y": 42, "w": 15, "h": 48},
+    {"id": "caption", "label": "标题、频道、订阅", "x": 0, "y": 74, "w": 85, "h": 18},
+    {"id": "nav", "label": "底部导航", "x": 0, "y": 92, "w": 100, "h": 8}
+   ],
+   "safe": {"x": 6, "y": 9, "w": 77, "h": 63}
+  }
+ }
+}
