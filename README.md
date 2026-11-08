@@ -13,7 +13,7 @@ It started inside a Remotion project that makes short explainer videos; every ru
 ## Install · 安装
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.6.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.7.0"
 video-lint final.mp4
 ```
 
@@ -63,6 +63,35 @@ ignore = ["static", "hit.*"]    # intentional — record only · 故意为之的
 [levels]
 "spec" = "info"                 # change one check's level · 改单项检查的级别
 ```
+
+## Why did viewers leave here? · 留存归因
+
+Put your platform analytics in the sidecar's `performance` and the report gets a `retention.why` entry: for each window where viewers left — the first 2 seconds, valleys the platform marks, bounce peaks, and stretches where you lost viewers faster than similar videos — it lists what happened on screen and in the sound at that moment, looking 1 s further back for reaction time:
+
+把平台后台的数据写进旁注的 `performance`，报告里会多一条 `retention.why`：每个掉人的时间窗（开头 2 秒、平台标的低谷、跳出峰、比同类掉得快的段）里，画面和声音发生了什么。人看到问题到划走有反应时间，所以每个窗口往前多看 1 秒：
+
+```
+Platform valley 0.6–1.3 s
+  - 0.73 s  animation mark draw
+  - 0.80 s  frame got darker (22 → 15)
+  - 1.07 s  animation mark flipEnd
+Lost faster than peers 3–5 s: 13.3%/s vs 7.7%/s
+  - 3.63 s  hit drop · entered shot lust · sound +9 dB
+```
+
+```jsonc
+"performance": {
+  "bounce2s": 0.413, "completion": 0.097,
+  "valleys": [[0.6, 1.2]],                 // low points the platform marks · 平台标的低谷（秒）
+  "bouncePeaks": [[0.3, 1.0, 0.27, 0.23]], // [from, to, share, peers' share] · 跳出分析里的峰
+  "retention": [[3, 0.47], [6, 0.31]],     // points read off the curve · 曲线上抄的点
+  "peers": [[2, 0.64], [6, 0.4]]           // similar videos · 同类作品
+}
+```
+
+Events: hard cuts, shot changes, caption changes, hits, sound effects, `marks` (named animation beats from the sidecar), black and frozen stretches, the frame suddenly getting brighter or darker, the sound suddenly getting louder or quieter, the first sound. They are listed, not judged: with a handful of videos, which one caused the drop is for a person to decide. `report.json` also carries the whole event timeline (`events`) and opening features (`features.openEvents`, `firstCutSec`) for comparing videos.
+
+事件包括：硬切、进镜头、换字幕、爆点、音效、`marks`（旁注里带名字的动画节拍）、黑场、静止、画面突然变亮 / 变暗、声音突然变大 / 变小、第一声。只列不判：几期的样本说不清哪个是原因，要人来看。`report.json` 里还有完整的事件表（`events`）和开头特征（`features.openEvents`、`firstCutSec`），方便跨期对照。
 
 ## Fix loop · 闭环修复
 
@@ -115,7 +144,7 @@ Every run also writes `report.html`: one self-contained file with the images emb
 ## GitHub Action
 
 ```yaml
-- uses: tz1335/video-lint@v0.6.0
+- uses: tz1335/video-lint@v0.7.0
   with:
     video: out/final.mp4
     args: --platform tiktok --lufs -14 --captions out/final.srt
@@ -129,7 +158,7 @@ Installs ffmpeg and video-lint, writes the report to the job summary, uploads th
 ## MCP server · 给 agent 用
 
 ```bash
-pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.6.0"
+pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.7.0"
 claude mcp add video-lint -- video-lint-mcp
 ```
 

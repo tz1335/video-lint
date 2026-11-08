@@ -30,7 +30,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = '0.6.0'
+VERSION = '0.7.0'
 # 「要听得见」的音效：冲击、动作音；whoosh、swish、paper、room 这类本来就轻，不查
 LOUD_DEFAULT = ['impact', 'press', 'drop', 'chime', 'bell', 'clink', 'stamp', 'coin', 'tick', 'gunshot', 'crack', 'chapter', 'footstep', 'bloom']
 ZONES_FILE = Path(__file__).with_name('zones.json')
@@ -764,6 +764,113 @@ def retention_check(r, perf, sc, fps, n):
     r.add('retention', 'info', f'发布数据：{head}', f'来源：{src}。完播率画在片尾，是近似。\n' + '\n'.join(f'  - {l}' for l in lines), rows)
 
 
+# —— 留存归因：掉人的那几秒，画面和声音里发生了什么 ——
+LAG = 1.0  # 看到问题到划走有反应时间：窗口往前多看 1 秒
+
+
+def event_timeline(sc, cuts, blacks, stills, y, sr, fps, n, mean=None):
+    """全片的事件表 [(秒, 类别, 说明)]：硬切、进镜头、换字幕、爆点、音效、黑场、静止、声音突然变大 / 变小、第一声"""
+    shots = sc.get('shots') or []
+    ev = [(c / fps, 'cut', f'硬切（{shot_at(shots, c)}）') for c in cuts]
+    ev += [(s_['from'] / fps, 'shot', f'进镜头 {s_["name"]}') for s_ in shots if s_['from'] > 0]
+    ev += [(c['from'] / fps, 'caption', f'字幕「{c["text"].split(" / ")[0][:14]}」') for c in sc.get('captions') or []]
+    ev += [(h['frame'] / fps, 'hit', f'爆点 {h["name"]}') for h in sc.get('hits') or []]
+    ev += [(x['frame'] / fps, 'sfx', f'音效 {x["name"]}') for x in sc.get('sfx') or []]
+    ev += [(x['frame'] / fps, 'mark', f'动画节拍 {x["name"]}') for x in sc.get('marks') or []]
+    if mean is not None and len(mean) > fps:
+        # 画面整体突然变亮 / 变暗：0.3 秒内平均亮度变了 30% 以上（硬切以外的大变化，比如闪白、收暗、换底色）
+        k, last = max(1, int(0.3 * fps)), -9.0
+        for i in range(k, len(mean)):
+            a_, b_ = float(mean[i - k]), float(mean[i])
+            if abs(b_ - a_) >= 0.3 * max(a_, b_, 8) and i / fps - last >= 0.5 and i not in cuts:
+                ev.append((i / fps, 'light', f'画面变{"亮" if b_ > a_ else "暗"}（{a_:.0f} → {b_:.0f}）'))
+                last = i / fps
+    ev += [(a / fps, 'black', f'黑场 {(b - a + 1) / fps:.1f} 秒') for a, b in blacks]
+    ev += [(a / fps, 'static', f'画面停住 {(b - a + 1) / fps:.1f} 秒') for a, b in stills]
+    if y is not None and len(y):
+        M = _momentary(y, sr)
+        first = next((i for i, m in enumerate(M) if m > -40), None)
+        if first is not None:
+            ev.append((first * 0.1, 'audio', f'第一声（{M[first]:.0f} dBFS）'))
+        last = -9.0
+        for i in range(5, len(M)):
+            base = float(np.median(M[i - 5:i]))
+            d = float(M[i] - base)
+            t = i * 0.1 + 0.2
+            if t - last < 0.5 or base < -55 and M[i] < -40:
+                continue
+            if d >= 8 and M[i] > -40:
+                ev.append((t, 'audio', f'声音变大 +{d:.0f} dB'))
+                last = t
+            elif d <= -10 and base > -40:
+                ev.append((t, 'audio', f'声音变小 {d:.0f} dB'))
+                last = t
+    return sorted((round(t, 2), k, x) for t, k, x in ev if 0 <= t <= n / fps)
+
+
+def _interp(pts, t):
+    pts = sorted(pts)
+    if not pts or t < pts[0][0] or t > pts[-1][0]:
+        return None
+    for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+        if t0 <= t <= t1:
+            return v0 + (v1 - v0) * (t - t0) / max(t1 - t0, 1e-9)
+    return pts[-1][1]
+
+
+def drop_windows(perf, duration):
+    """要归因的时间窗 [(起秒, 止秒, 名字, 说明)]：开头 2 秒、后台标的低谷、跳出峰、比同类掉得多的那几段"""
+    win = []
+    peers = [(0.0, 1.0)] + [(float(t), v) for t, v in perf.get('peers') or []]
+    if perf.get('bounce2s') is not None:
+        p2 = _interp(peers, 2.0) if len(peers) > 1 else None
+        win.append((0.0, 2.0, '开头 2 秒', f'2 秒跳出 {perf["bounce2s"]:.1%}' + (f'（同类约 {1 - p2:.0%}）' if p2 is not None else '')))
+    for a, b in perf.get('valleys') or []:
+        win.append((float(a), float(b), '后台低谷', '平台在观看趋势上标出的低谷'))
+    for pk in perf.get('bouncePeaks') or []:
+        a, b = pk[0], pk[1]
+        share = pk[2] if len(pk) > 2 else None
+        peer = pk[3] if len(pk) > 3 else None
+        win.append((float(a), float(b), '跳出峰', (f'这段跳出 {share:.0%}' if share is not None else '跳出分析里的峰') + (f'（同类 {peer:.0%}）' if peer is not None else '')))
+    pts = retention_points(perf, duration)
+    if len(peers) > 1:
+        ex = []
+        for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+            q0, q1 = _interp(peers, t0), _interp(peers, t1)
+            if t0 < 2 or q0 is None or q1 is None or v0 <= 0 or q0 <= 0:
+                continue
+            ours, theirs = (v0 - v1) / v0 / (t1 - t0), (q0 - q1) / q0 / (t1 - t0)
+            if ours - theirs > 0.01:
+                ex.append((ours - theirs, t0, t1, ours, theirs))
+        for d, t0, t1, ours, theirs in sorted(ex, reverse=True)[:2]:
+            win.append((t0, t1, '比同类多掉', f'每秒走掉 {ours:.1%}，同类 {theirs:.1%}'))
+    return win
+
+
+def attribution_check(r, perf, events, fps, n):
+    """每个掉人的窗口里（往前多看 1 秒）发生了哪些事件。只列出来，不判对错：样本太少，因果要人判断"""
+    rows, data = [], []
+    for a, b, name, why in drop_windows(perf, n / fps):
+        lo = max(0.0, a - LAG) if a > 0 else 0.0
+        evs = [e for e in events if lo <= e[0] <= b]
+        data.append({'from': a, 'to': b, 'name': name, 'why': why, 'events': [{'t': t, 'kind': k, 'text': x} for t, k, x in evs]})
+        rows.append(f'{name} {a:g}–{b:g} 秒：{why}' + ('' if a == 0 else f'（事件从 {lo:g} 秒起算）'))
+        rows += [f'  - {t:.2f} 秒　{x}' for t, k, x in evs[:14]] or ['  - 这段时间里没检测到事件：可能是内容本身（话题、节奏）的问题']
+    if not data:
+        return
+    r.add('retention.why', 'info', f'掉人的 {len(data)} 个时间窗里发生了什么',
+          '把留存掉得多的时间窗（开头 2 秒、后台低谷、跳出峰、比同类掉得多的段）对上同一时刻的画面和声音事件；人看到问题到划走有反应时间，所以每个窗口往前多看 1 秒。'
+          '只列事件不下结论：哪一个是原因要人判断，多期一起看才有意义（table.mjs）。\n' + '\n'.join(rows), data)
+
+
+def open_events(events, sec=2.0):
+    """前 2 秒的事件摘要，给跨期汇总用"""
+    early = [e for e in events if e[0] < sec]
+    first = lambda kind: next((t for t, k, _ in events if k == kind), None)
+    return {'openEvents': len(early), 'openCuts': sum(1 for e in early if e[1] == 'cut'), 'openShots': sum(1 for e in early if e[1] == 'shot'),
+            'firstCutSec': first('cut'), 'firstSoundSec': first('audio') if any(k == 'audio' and x.startswith('第一声') for _, k, x in events) else None}
+
+
 # —— 手机外放（单声道）——
 def mono_check(r, video, fps):
     """手机外放、蓝牙小音箱常常把左右声道混成一个。相位相反的部分会互相抵消，声音突然变小甚至消失。
@@ -1370,6 +1477,7 @@ def main():
         r.add('beats.cuts', 'info', '没检测到硬切', '叠化转场不算硬切')
 
     # —— 音频 ——
+    aud = (None, 48000)
     if P['audio']:
         L = loudness(video)
         off = abs(L['I'] - a.lufs) if a.lufs is not None else 0
@@ -1377,6 +1485,7 @@ def main():
         r.add('audio.loudness', lv, f'整片 {L["I"]} LUFS、真峰值 {L["TP"]} dBFS、响度范围 {L["LRA"]} LU',
               (f'目标 {a.lufs} ±1 LUFS' if a.lufs is not None else '没给 --lufs，响度只记录') + '；真峰值不能高于 −1.0 dBFS', L)
         y, sr = audio_mono(video)
+        aud = (y, sr)
         open_db = db(y[: int(0.5 * sr)])
         mono_check(r, video, fps)
         audio_jump_check(r, y, sr, fps, [h['frame'] for h in sc.get('hits', [])])
@@ -1463,8 +1572,10 @@ def main():
     if extra:
         grid([label(ims[f], f'{name or shot_at(shots, f)} f{f} {f / fps:.2f}s', zones, boxes.get(f)) for f, name in extra], 4, out / 'frames.jpg')
         images['frames'] = str(out / 'frames.jpg')
+    events = event_timeline(sc, cuts, mid, stills, aud[0], aud[1], fps, n, mean)
     if sc.get('performance'):
         retention_check(r, sc['performance'], sc, fps, n)
+        attribution_check(r, sc['performance'], events, fps, n)
     open_feat = opening_rules(r, sc, boxes, bright, fps, n, P, from_ocr=boxes_from_ocr)
     # 第 0 帧原尺寸单独存一张：在信息流里刷到时看到的就是它（开头规则 6）
     extract_frames(video, [0], P['width'], out)[0].save(out / 'frame0.jpg', quality=90)
@@ -1475,7 +1586,7 @@ def main():
     features = {'durationSec': round(n / fps, 2), 'frame0Visible': round(visible, 4), 'firstVisibleFrame': first_visible,
                 'firstCaptionFrame': caps[0]['from'] if caps else None,
                 'openMotionRatio': round(float(diff[1:int(2 * fps)].mean()) / max(float(np.median(diff[1:])), 1e-3), 2) if n > 4 * fps else None,
-                'portrait': portrait, **open_feat}
+                'portrait': portrait, **open_feat, **open_events(events)}
     images['curve'] = str(out / 'curve.png')
 
     # —— 和上一版比 ——
@@ -1509,7 +1620,7 @@ def main():
     (out / 'report.md').write_text('\n'.join(md), encoding='utf-8')
     images['fix'] = str(write_fix(out, r.checks, video, fps))
     images['html'] = str(write_html(out, f'video-lint 报告：{sc.get("id") or video.name}', video, status, headline, r.checks, images, fps))
-    (out / 'report.json').write_text(json.dumps({'tool': 'video-lint', 'version': VERSION, 'video': str(video), 'sidecar': a.sidecar, 'status': status, 'summary': summary, 'features': features, 'performance': sc.get('performance'), 'checks': r.checks, 'images': images}, ensure_ascii=False, indent=1), encoding='utf-8')
+    (out / 'report.json').write_text(json.dumps({'tool': 'video-lint', 'version': VERSION, 'video': str(video), 'sidecar': a.sidecar, 'status': status, 'summary': summary, 'features': features, 'events': events, 'performance': sc.get('performance'), 'checks': r.checks, 'images': images}, ensure_ascii=False, indent=1), encoding='utf-8')
     print(f'{headline} → {out / "report.md"}')
     for c in r.checks:
         if c['level'] in ('fail', 'warn', 'skip'):

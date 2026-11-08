@@ -571,3 +571,34 @@ def test_mcp_verify_fix(tmp_path):
     assert 'open.frame0' in res['fixed'] and res['added'] == [] and res['done'] is True
     # 输出目录和上一版一样会覆盖掉上一版：拒绝
     assert 'error' in mcp_server.verify_fix(str(new), first['report_json'], out=str(Path(first['report_json']).parent), ocr=False)
+
+
+# —— 留存归因 ——
+
+def test_drop_windows():
+    perf = {'bounce2s': 0.4, 'valleys': [[0.6, 1.3]], 'bouncePeaks': [[6, 7, 0.08, 0.04]], 'completion': 0.1,
+            'retention': [[4, 0.5], [8, 0.2], [12, 0.15]], 'peers': [[2, 0.7], [4, 0.6], [8, 0.5], [12, 0.4]]}
+    win = lint.drop_windows(perf, 20)
+    names = [w[2] for w in win]
+    assert names[:3] == ['开头 2 秒', '后台低谷', '跳出峰']
+    assert '同类约 30%' in win[0][3]
+    worse = [w for w in win if w[2] == '比同类多掉']
+    assert worse[0][:2] == (4.0, 8.0)  # 4–8 秒我们每秒掉 15%，同类 4%：比同类多掉最多的一段
+    assert lint.drop_windows({}, 20) == []
+
+
+def test_attribution_lists_events_in_window(tmp_path):
+    # 第 45 帧（1.5 秒）硬切到暗画面，旁注标一个低谷 1.6–2.2 秒：归因要把这次硬切列进去（往前多看 1 秒）
+    v = make_video(tmp_path / 'v.mp4', f'if(lt(N,45),{MOVING},30+10*sin(X/7+N/3))', seconds=3, audio=TONE)
+    sc = {'fps': FPS, 'durationFrames': 90, 'shots': [{'name': 'a', 'from': 0, 'to': 45}, {'name': 'b', 'from': 45, 'to': 90}],
+          'hits': [], 'sfx': [], 'captions': [], 'marks': [{'name': 'title', 'frame': 50}],
+          'performance': {'bounce2s': 0.4, 'valleys': [[1.6, 2.2]], 'completion': 0.2}}
+    r = lint_report(v, tmp_path / 'out', '--no-ocr', sidecar=sc)
+    why = r['by']['retention.why']
+    assert why['level'] == 'info'
+    valley = next(w for w in why['data'] if w['name'] == '后台低谷')
+    kinds = {e['kind'] for e in valley['events']}
+    assert {'cut', 'shot', 'mark'} <= kinds, valley['events']
+    assert any(e['kind'] == 'light' and '暗' in e['text'] for e in valley['events'])
+    assert r['features']['openEvents'] >= 3 and r['features']['firstCutSec'] == 1.5
+    assert any(e[1] == 'cut' for e in r['events'])
