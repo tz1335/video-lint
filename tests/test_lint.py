@@ -283,3 +283,50 @@ def test_slow_fade_is_not_a_flash(tmp_path):
     r = lint_report(v, tmp_path / 'out', '--no-ocr')
     assert r['by']['flash']['level'] == 'pass'
     assert r['by']['flash']['data']['maxTransitionsPerSecond'] <= 2
+
+
+# —— 上传规格 ——
+
+def test_spec_pass_and_warnings(tmp_path):
+    v = make_video(tmp_path / 'ok.mp4', MOVING, w=320, h=180, seconds=2, audio=TONE)
+    r = lint_report(v, tmp_path / 'o1', '--no-ocr', '--no-flash')
+    issues = r['by']['spec']['data']['issues']
+    assert all('像素格式' not in x and '编码' not in x for x in issues)  # h264 + yuv420p 没问题
+    assert any('短边' in x for x in issues)  # 180 像素太小
+    r = lint_report(v, tmp_path / 'o2', '--no-ocr', '--no-flash', '--platform', 'tiktok')
+    assert any('画幅 16:9' in x for x in r['by']['spec']['data']['issues'])
+
+
+def test_spec_flags_non_420_pixel_format(tmp_path):
+    v = make_rgb_video(tmp_path / 'rgb.mkv', flicker(1, seconds=1))
+    r = lint_report(v, tmp_path / 'out', '--no-ocr', '--no-flash')
+    assert r['by']['spec']['level'] == 'warn'
+    assert any('像素格式' in x for x in r['by']['spec']['data']['issues'])
+
+
+# —— 字幕导入和阅读速度 ——
+
+BS = chr(92)  # 反斜杠：ASS 的样式标签和换行都用它
+
+
+def test_parse_srt_vtt_ass(tmp_path):
+    (tmp_path / 'a.srt').write_text('1\n00:00:00,500 --> 00:00:02,000\n<i>你好</i>\n世界\n\n2\n00:00:02,000 --> 00:00:03,250\nHi\n', encoding='utf-8')
+    (tmp_path / 'a.vtt').write_text('WEBVTT\n\n00:00.500 --> 00:02.000 line:0\n你好世界\n', encoding='utf-8')
+    (tmp_path / 'a.ass').write_text('[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
+                                    'Dialogue: 0,0:00:00.50,0:00:02.00,Default,,0,0,0,,{' + BS + 'b1}你好' + BS + 'N世界\n', encoding='utf-8')
+    srt = lint.parse_captions(tmp_path / 'a.srt', 30)
+    assert srt == [{'from': 15, 'to': 60, 'text': '你好 世界'}, {'from': 60, 'to': 98, 'text': 'Hi'}]
+    assert lint.parse_captions(tmp_path / 'a.vtt', 30) == [{'from': 15, 'to': 60, 'text': '你好世界'}]
+    assert lint.parse_captions(tmp_path / 'a.ass', 30) == [{'from': 15, 'to': 60, 'text': '你好 世界'}]
+
+
+def test_reading_speed_from_srt(tmp_path):
+    v = make_video(tmp_path / 'v.mp4', MOVING, seconds=4, audio=TONE)
+    (tmp_path / 'c.srt').write_text('1\n00:00:00,000 --> 00:00:02,000\n八个字刚好读得完\n\n'
+                                    '2\n00:00:02,000 --> 00:00:03,000\n这一句字幕在一秒里塞了十五个字太快了\n\n'
+                                    '3\n00:00:03,000 --> 00:00:03,500\n太短\n', encoding='utf-8')
+    r = lint_report(v, tmp_path / 'out', '--no-ocr', '--no-flash', '--captions', str(tmp_path / 'c.srt'))
+    sp = r['by']['captions.speed']
+    assert sp['level'] == 'warn'
+    assert sp['data'] == {'fast': 1, 'short': 1}
+    assert '开头规则 2' in r['by']['open.rule2']['title'] if 'open.rule2' in r['by'] else True

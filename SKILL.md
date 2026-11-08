@@ -62,6 +62,8 @@ A sidecar JSON unlocks the timing checks. Times are in **frames**, the beat grid
 
 ## Thresholds worth knowing
 
+- `--captions file.srt|.vtt|.ass` → caption reading speed (Netflix: ≤ 9 CJK chars/s, ≤ 20 Latin chars/s, ≥ 5/6 s on screen) and the opening-line rules, without a sidecar
+- Upload spec for `--platform` (codec, pixel format, fps, resolution, aspect, duration limit, audio) warns only; values live in `video_lint/specs.json`
 - Flashing (WCAG 2.3.1): more than 3 flashes, or 3 red flashes, in any one second over ~11% of the frame → fail; `--no-flash` skips it
 - Frame 0: near-black → fail; under 0.5% of pixels brighter than 60/255 → fail
 - Text size on frame 0: line height ÷ video **width** (both orientations fill the phone width) — under 2.5% fail, under 4% warn

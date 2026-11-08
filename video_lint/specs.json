@@ -1,0 +1,19 @@
+{
+ "note": "上传规格的推荐值，只用来提醒（⚠），不判 ✗。平台会改规则，以平台官方说明为准；改了直接改这个文件。maxSeconds 只写了有把握的平台，没把握的留 null。",
+ "checked": "2026-11",
+ "common": {
+  "videoCodecs": ["h264", "hevc"],
+  "pixelFormats": ["yuv420p", "yuvj420p"],
+  "maxFps": 60,
+  "audioCodecs": ["aac", "mp3", "opus"],
+  "audioSampleRates": [44100, 48000],
+  "minBitrate1080p": 2500000
+ },
+ "platforms": {
+  "douyin": {"name": "抖音", "aspects": ["9:16", "16:9", "3:4"], "minShortSide": 720, "recommended": "1080×1920 竖屏", "maxSeconds": null},
+  "tiktok": {"name": "TikTok", "aspects": ["9:16"], "minShortSide": 720, "recommended": "1080×1920", "maxSeconds": 600},
+  "reels": {"name": "Instagram Reels", "aspects": ["9:16"], "minShortSide": 720, "recommended": "1080×1920", "maxSeconds": 180},
+  "shorts": {"name": "YouTube Shorts", "aspects": ["9:16", "1:1"], "minShortSide": 720, "recommended": "1080×1920", "maxSeconds": 180},
+  "none": {"name": "通用", "aspects": [], "minShortSide": 720, "recommended": "", "maxSeconds": null}
+ }
+}

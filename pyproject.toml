@@ -33,7 +33,7 @@ Homepage = "https://github.com/tz1335/video-lint"
 packages = ["video_lint"]
 
 [tool.setuptools.package-data]
-video_lint = ["zones.json"]
+video_lint = ["zones.json", "specs.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "video_lint.lint.VERSION"}

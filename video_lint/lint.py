@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = '0.2.0.dev0'
+VERSION = '0.2.0'
 # 「要听得见」的音效：冲击、动作音；whoosh、swish、paper、room 这类本来就轻，不查
 LOUD_DEFAULT = ['impact', 'press', 'drop', 'chime', 'bell', 'clink', 'stamp', 'coin', 'tick', 'gunshot', 'crack', 'chapter', 'footstep', 'bloom']
 ZONES_FILE = Path(__file__).with_name('zones.json')
@@ -476,6 +476,123 @@ def flash_check(r, video, P, fps, shots):
             r.add(key, 'pass', f'没有超标的{name}', f'任意 1 秒内最多 {worst} 次大面积跳变（{worst / 2:.1f} 次闪烁），标准是不超过 3 次闪烁', {'maxTransitionsPerSecond': worst})
 
 
+# —— 上传规格（specs.json，只提醒不判 ✗）——
+SPECS_FILE = Path(__file__).with_name('specs.json')
+
+
+def _ratio(w, h):
+    from math import gcd
+    g = gcd(w, h)
+    return f'{w // g}:{h // g}'
+
+
+def spec_check(r, video, platform):
+    """编码、像素格式、帧率、分辨率、画幅、码率、时长、音频，对照目标平台的推荐值"""
+    spec = json.loads(SPECS_FILE.read_text(encoding='utf-8'))
+    c, p = spec['common'], spec['platforms'].get(platform) or spec['platforms']['none']
+    j = json.loads(run(['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type,codec_name,pix_fmt,width,height,r_frame_rate,avg_frame_rate,sample_rate,channels', '-show_entries', 'format=duration,bit_rate,size', '-of', 'json', str(video)], text=True).stdout)
+    v = next(x for x in j['streams'] if x['codec_type'] == 'video')
+    au = next((x for x in j['streams'] if x['codec_type'] == 'audio'), None)
+    fmt = j.get('format', {})
+    w, h = int(v['width']), int(v['height'])
+    fr = lambda s_: (lambda a, b: float(a) / float(b) if float(b) else 0.0)(*s_.split('/'))
+    fps, avg = fr(v.get('r_frame_rate', '0/1')), fr(v.get('avg_frame_rate', '0/1'))
+    dur, rate = float(fmt.get('duration') or 0), float(fmt.get('bit_rate') or 0)
+    issues = []
+    if v.get('codec_name') not in c['videoCodecs']:
+        issues.append(f'视频编码 {v.get("codec_name")}，平台一般要 {" / ".join(c["videoCodecs"])}，上传后会被重新压缩或者传不上去')
+    if v.get('pix_fmt') not in c['pixelFormats']:
+        issues.append(f'像素格式 {v.get("pix_fmt")}，手机和平台普遍只认 yuv420p（导出时加 -pix_fmt yuv420p）')
+    if fps > c['maxFps'] + 0.01:
+        issues.append(f'帧率 {fps:g} fps，超过 {c["maxFps"]}')
+    if avg and abs(avg - fps) > 0.5:
+        issues.append(f'可变帧率（标称 {fps:g}、平均 {avg:.2f} fps），平台转码时可能音画不同步')
+    if w % 2 or h % 2:
+        issues.append(f'分辨率 {w}×{h} 有奇数边，部分编码器和播放器不支持')
+    if min(w, h) < p['minShortSide']:
+        issues.append(f'短边只有 {min(w, h)} 像素，低于 {p["minShortSide"]}，在手机上会糊' + (f'（推荐 {p["recommended"]}）' if p['recommended'] else ''))
+    if p['aspects'] and _ratio(w, h) not in p['aspects']:
+        issues.append(f'画幅 {_ratio(w, h)}，{p["name"]}信息流主要是 {" / ".join(p["aspects"])}，会加黑边或被裁')
+    hints = []
+    if rate and min(w, h) >= 1080 and rate < c['minBitrate1080p']:
+        # 只提示不报警：按质量（CRF）导出时，暗底、静止多的片子码率本来就低，画质并不差（ep52 1.3 Mbps、ep53 1.8 Mbps 都是这样）
+        hints.append(f'码率 {rate / 1e6:.1f} Mbps，低于 1080p 常见的 {c["minBitrate1080p"] / 1e6:.1f} Mbps：画面细节多的话平台再压一次可能偏糊；暗底、静止多的片子码率本来就低，可以不管')
+    if p['maxSeconds'] and dur > p['maxSeconds']:
+        issues.append(f'时长 {dur:.1f} 秒，超过{p["name"]}的 {p["maxSeconds"]} 秒上限')
+    if au:
+        if au.get('codec_name') not in c['audioCodecs']:
+            issues.append(f'音频编码 {au.get("codec_name")}，一般用 AAC')
+        if au.get('sample_rate') and int(au['sample_rate']) not in c['audioSampleRates']:
+            issues.append(f'音频采样率 {au["sample_rate"]} Hz，一般是 44100 或 48000')
+    summary = f'{w}×{h}，{fps:g} fps，{v.get("codec_name")} / {v.get("pix_fmt")}，{rate / 1e6:.1f} Mbps，{dur:.1f} 秒' + (f'，音频 {au.get("codec_name")} {au.get("sample_rate")} Hz' if au else '')
+    r.add('spec', 'warn' if issues else 'pass', f'上传规格（{p["name"]}）：' + (f'{len(issues)} 处要注意' if issues else '都在推荐范围内'),
+          summary + '。推荐值来自 specs.json（' + spec['checked'] + ' 核对），平台会改，以官方为准。' + ('\n' + '\n'.join(f'  - {x}' for x in issues) if issues else '') + ''.join(f'\n  - （提示）{x}' for x in hints), {'issues': issues, 'hints': hints, 'width': w, 'height': h, 'fps': fps, 'bitrate': rate, 'duration': dur})
+
+
+# —— 字幕文件导入和阅读速度 ——
+_TS = re.compile(r'(\d+):(\d{2}):(\d{2})[,.](\d{1,3})')
+
+
+def _sec(m):
+    h, mi, se, frac = m.groups()
+    return int(h) * 3600 + int(mi) * 60 + int(se) + int(frac.ljust(3, '0')[:3]) / 1000
+
+
+def parse_captions(path, fps):
+    """SRT / VTT / ASS → [{'from': 帧, 'to': 帧, 'text': 文本}]，去掉样式标签"""
+    text = Path(path).read_text(encoding='utf-8-sig', errors='replace')
+    out = []
+    if Path(path).suffix.lower() in ('.ass', '.ssa'):
+        fields = None
+        for line in text.splitlines():
+            if line.startswith('Format:') and fields is None and 'Start' in line:
+                fields = [f.strip() for f in line[7:].split(',')]
+            elif line.startswith('Dialogue:') and fields:
+                parts = line[9:].split(',', len(fields) - 1)
+                row = dict(zip(fields, parts))
+                t0, t1 = (_TS.match('0' + row['Start'].strip() if row['Start'].strip().count(':') == 2 and len(row['Start'].strip().split(':')[0]) == 1 else row['Start'].strip()),
+                          _TS.match('0' + row['End'].strip() if row['End'].strip().count(':') == 2 and len(row['End'].strip().split(':')[0]) == 1 else row['End'].strip()))
+                body = re.sub(r'\{[^}]*\}', '', row.get('Text', '')).replace(chr(92) + 'N', ' ').replace(chr(92) + 'n', ' ').strip()  # ASS 的换行写成反斜杠 N / n
+                if t0 and t1 and body:
+                    out.append({'from': round(_sec(t0) * fps), 'to': round(_sec(t1) * fps), 'text': body})
+    else:  # SRT / VTT：一块一块，时间行是「起 --> 止」
+        for block in re.split(r'\n\s*\n', text.replace('\r\n', '\n')):
+            lines = [l for l in block.strip().split('\n') if l.strip()]
+            for i, l in enumerate(lines):
+                if '-->' in l:
+                    a, b = l.split('-->')[:2]
+                    m0, m1 = _TS.search(a if a.count(':') == 2 else '00:' + a.strip()), _TS.search(b if b.split()[0].count(':') == 2 else '00:' + b.strip())
+                    body = re.sub(r'<[^>]+>', '', ' '.join(lines[i + 1:])).strip()
+                    if m0 and m1 and body:
+                        out.append({'from': round(_sec(m0) * fps), 'to': round(_sec(m1) * fps), 'text': body})
+                    break
+    return sorted(out, key=lambda c: c['from'])
+
+
+CJK = re.compile(r'[㐀-鿿豈-﫿぀-ヿ가-힯]')
+
+
+def reading_speed_check(r, caps, fps):
+    """每条字幕每秒要读多少字：中日韩文字超过 9 字 / 秒、其它文字超过 20 字符 / 秒 ⚠；停留不到 5/6 秒 ⚠（Netflix 字幕规范）。
+    旁注里「主句 / 副句」这种双语或两层字幕只算主句。"""
+    fast, short = [], []
+    for c in caps:
+        main = c['text'].split(' / ')[0]
+        sec = max((c['to'] - c['from']) / fps, 1e-3)
+        cjk = len(CJK.findall(main))
+        if cjk >= len(re.findall(r'[A-Za-z0-9]', main)):
+            n, limit, unit = cjk + len(re.findall(r'[A-Za-z0-9]+', main)), 9, '字'
+        else:
+            n, limit, unit = len(re.sub(r'\s+', ' ', main).strip()), 20, '字符'
+        if n / sec > limit:
+            fast.append(f'  - {c["from"] / fps:.2f} 秒「{main[:24]}」{n} {unit} / {sec:.2f} 秒 = {n / sec:.1f} {unit}/秒（上限 {limit}）')
+        if sec < 5 / 6:
+            short.append(f'  - {c["from"] / fps:.2f} 秒「{main[:24]}」只停留 {sec:.2f} 秒')
+    lv = 'warn' if fast or short else 'pass'
+    r.add('captions.speed', lv, f'字幕阅读速度：{len(caps)} 条里 {len(fast)} 条太快、{len(short)} 条停留太短' if lv == 'warn' else f'字幕阅读速度：{len(caps)} 条都读得完',
+          '标准（Netflix 字幕规范）：中文每秒不超过 9 个字，英文每秒不超过 20 个字符，每条至少停留 5/6 秒。' + ('\n' + '\n'.join(fast[:20] + short[:10]) if lv == 'warn' else ''), {'fast': len(fast), 'short': len(short)})
+
+
 def audio_mono(video, sr=48000):
     raw = run(['ffmpeg', '-v', 'error', '-i', str(video), '-vn', '-ac', '1', '-ar', str(sr), '-f', 'f32le', '-']).stdout
     return np.frombuffer(raw, np.float32), sr
@@ -653,6 +770,7 @@ def main():
     ap.add_argument('--platform', choices=['douyin', 'tiktok', 'reels', 'shorts', 'none'], help='竖屏联系表叠哪个平台的界面，默认取旁注的 platform（没有就是 douyin）')
     ap.add_argument('--sfx-audio', help='只有音效的分轨（wav，或者「无配乐仅音效」版 mp4）；有它就用音效 / 配乐能量比判断听不听得见')
     ap.add_argument('--text-dir',help='文字层 PNG 目录（textlayer.mjs 的输出），有它才自动查遮挡区和出画')
+    ap.add_argument('--captions', help='字幕文件（.srt / .vtt / .ass），用来查阅读速度、开头第一句；会覆盖旁注里的字幕')
     ap.add_argument('--no-flash', action='store_true', help='不做闪烁安全检查（WCAG 2.3.1）')
     ap.add_argument('--no-ocr', action='store_true', help='没有文字层时也不用 OCR 找字')
     ap.add_argument('--text-failed', help='（run.mjs 用）文字层渲染失败的原因')
@@ -669,6 +787,8 @@ def main():
     # —— 基本信息 ——
     P = probe(video)
     fps = P['fps']
+    if a.captions:
+        sc['captions'] = parse_captions(a.captions, fps)
     mean, p995, diff, bright = frame_series(video, P['width'], P['height'])
     n = len(mean)
     portrait = P['height'] > P['width']
@@ -724,6 +844,13 @@ def main():
         early = [s for s in stills if s[0] < 3 * fps]
         r.add('static', 'warn' if early else 'info', '画面几乎不动超过 1 秒的段' + ('（前 3 秒就有）' if early else ''),
               '；'.join(f'{s / fps:.2f}–{e / fps:.2f} 秒（{shot_at(sc.get("shots", []), s)}）' for s, e in stills), [[s, e] for s, e in stills])
+
+    # —— 字幕阅读速度 ——
+    if sc.get('captions'):
+        reading_speed_check(r, sc['captions'], fps)
+
+    # —— 上传规格 ——
+    spec_check(r, video, a.platform or sc.get('platform', 'none'))
 
     # —— 闪烁安全 ——
     if not a.no_flash:

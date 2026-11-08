@@ -30,6 +30,7 @@ Without installing, from a clone: `pip install -r requirements.txt`, then `pytho
 ```bash
 video-lint final.mp4                                   # report in final-lint/
 video-lint final.mp4 --platform tiktok --lufs -14 --strict
+video-lint final.mp4 --captions final.srt          # caption reading speed and opening line · 字幕阅读速度和开头第一句
 video-lint final.mp4 --sidecar examples/sidecar.example.json --out report/
 ```
 
@@ -65,6 +66,8 @@ The tests synthesise small videos with known answers using ffmpeg (a black first
 | Frame 0 · 第 0 帧 | near-black ✗; under 0.5% bright pixels ✗; clearly darker than 0.5–2 s (fade-in) ⚠<br>近乎全黑 ✗；亮像素不到 0.5% ✗；明显比 0.5–2 秒暗（淡入开场）⚠ |
 | First 2 seconds · 前 2 秒 | black frames ⚠; motion relative to the rest of the video (recorded)<br>有黑帧 ⚠；运动量和全片相比的倍数（只记录） |
 | Flashing (WCAG 2.3.1) · 闪烁安全 | more than 3 general or red flashes in any second over a large area ✗ (area ≈ 11% of the frame, summed over the whole frame, slightly stricter than the standard)<br>任意 1 秒内大面积闪烁或红色闪烁超过 3 次 ✗（面积约占画面 11%，按整帧累加，比标准略严）。可能诱发光敏性癫痫 |
+| Upload spec · 上传规格 | codec, pixel format, frame rate, resolution, aspect for the `--platform`, duration limit, audio codec and sample rate ⚠ (low bitrate is only a hint); recommended values in `video_lint/specs.json`<br>编码、像素格式、帧率、分辨率、对应 `--platform` 的画幅、时长上限、音频编码和采样率 ⚠（码率偏低只提示）；推荐值在 `video_lint/specs.json` |
+| Caption reading speed · 字幕阅读速度 | more than 9 CJK characters or 20 Latin characters per second, or on screen for under 5/6 s ⚠ (Netflix timed-text guidelines); captions from the sidecar or `--captions file.srt / .vtt / .ass`<br>中文每秒超过 9 个字、英文每秒超过 20 个字符，或停留不到 5/6 秒 ⚠（Netflix 字幕规范）；字幕来自旁注，或 `--captions` 直接读 SRT / VTT / ASS |
 | Black / frozen · 黑场和静止 | black runs mid-video ⚠; frozen ≥ 1 s in the first 3 s ⚠<br>片中黑场 ⚠；前 3 秒有 1 秒以上不动 ⚠ |
 | Hits (with sidecar) · 爆点（需要旁注） | darken before, freeze N frames, burst after<br>爆点前收暗、最后 N 帧静止、爆点后亮起 |
 | Cut on beat · 硬切卡拍 | hard cuts more than ±1.5 frames off the grid ⚠ / ✗<br>硬切离拍点超过 ±1.5 帧 ⚠ / ✗ |
