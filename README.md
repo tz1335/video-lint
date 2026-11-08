@@ -13,13 +13,13 @@ It started inside a Remotion project that makes short explainer videos; every ru
 ## Install · 安装
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.1.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.3.0"
 video-lint final.mp4
 ```
 
-`[ocr]` adds RapidOCR for the text checks on any video; drop it for a lighter install. `[beats]` adds librosa for estimating the beat grid from audio; `[all]` installs both. Plain `pip install` works the same way. Requires `ffmpeg` / `ffprobe` on PATH.
+`[ocr]` adds RapidOCR for the text checks on any video; drop it for a lighter install. `[beats]` adds librosa for estimating the beat grid from audio, `[mcp]` the MCP server; `[all]` installs everything. Plain `pip install` works the same way. Requires `ffmpeg` / `ffprobe` on PATH.
 
-`[ocr]` 会装上 RapidOCR，对任何视频都能做文字检查；不要的话去掉它，装起来更轻。`[beats]` 装 librosa，用来从音频估拍子网格；`[all]` 两个都装。用普通的 `pip install` 也一样。需要 `ffmpeg` / `ffprobe` 在 PATH 里。
+`[ocr]` 会装上 RapidOCR，对任何视频都能做文字检查；不要的话去掉它，装起来更轻。`[beats]` 装 librosa，用来从音频估拍子网格；`[mcp]` 装 MCP 服务；`[all]` 全都装。用普通的 `pip install` 也一样。需要 `ffmpeg` / `ffprobe` 在 PATH 里。
 
 Without installing, from a clone: `pip install -r requirements.txt`, then `python -I lint.py final.mp4`.
 
@@ -40,13 +40,60 @@ video-lint final.mp4 --sidecar examples/sidecar.example.json --out report/
 
 *联系表的一部分：红框是抖音界面遮挡区，绿色虚线是推荐安全区，青框是识别出的文字行。顶部的钩子压在顶栏下面，第二行小字幕落在文案区里，`report.md` 里都判了出来。*
 
-Outputs (`--out`, default `<video>-lint/`): `report.md` for people, `report.json` for agents, `sheet-*.jpg` contact sheets, `frame0.jpg`, `hits.jpg`, `curve.png`. See `SKILL.md` for every option, the sidecar format and how to read `report.json`. `SKILL.md` follows the Agent Skills format, so this folder can be dropped into any agent that supports skills.
+Outputs (`--out`, default `<video>-lint/`): `report.html` (self-contained), `report.md` for people, `report.json` for agents, `sheet-*.jpg` contact sheets, `frame0.jpg`, `hits.jpg`, `curve.png`. See `SKILL.md` for every option, the sidecar format and how to read `report.json`. `SKILL.md` follows the Agent Skills format, so this folder can be dropped into any agent that supports skills.
 
-输出（`--out`，默认 `<视频名>-lint/`）：给人看的 `report.md`、给 agent 读的 `report.json`、联系表 `sheet-*.jpg`、`frame0.jpg`、`hits.jpg`、`curve.png`。全部参数、旁注格式、`report.json` 怎么读，见 `SKILL.md`。`SKILL.md` 按 Agent Skills 格式写，整个目录可以直接放进任何支持 skill 的 agent 里用。
+输出（`--out`，默认 `<视频名>-lint/`）：单文件的 `report.html`、给人看的 `report.md`、给 agent 读的 `report.json`、联系表 `sheet-*.jpg`、`frame0.jpg`、`hits.jpg`、`curve.png`。全部参数、旁注格式、`report.json` 怎么读，见 `SKILL.md`。`SKILL.md` 按 Agent Skills 格式写，整个目录可以直接放进任何支持 skill 的 agent 里用。
 
 Without a text layer, text is found with OCR when `[ocr]` is installed (it can miss tiny, stylised or low-contrast text, so "no text on frame 0" from OCR is only a warning).
 
 没有文字层时，装了 `[ocr]` 就用 OCR 找字（很小、艺术字、低对比的字可能漏掉，所以 OCR 判出的「第 0 帧没有字」只给 ⚠）。
+
+## Config file · 配置文件
+
+Put a `.video-lint.toml` next to your videos (or any folder above them); command-line flags still win.
+
+把 `.video-lint.toml` 放在视频所在目录或者上层任意目录，video-lint 会自动找到；命令行参数优先于配置文件。
+
+```toml
+platform = "douyin"
+lufs = -14
+loud = ["impact", "chime"]      # sound effects that must be audible · 要听得见的音效
+captions = "final.srt"          # paths are relative to this file · 路径相对配置文件
+ignore = ["static", "hit.*"]    # intentional — record only · 故意为之的，只记录
+[levels]
+"spec" = "info"                 # change one check's level · 改单项检查的级别
+```
+
+## Shareable HTML report · 可以直接发的 HTML 报告
+
+Every run also writes `report.html`: one self-contained file with the images embedded, checks filterable by level. Send it to whoever needs to look.
+
+每次运行都会额外生成 `report.html`：图片全部嵌在一个文件里，能按级别筛选检查项。发给谁都能直接打开看。
+
+## GitHub Action
+
+```yaml
+- uses: tz1335/video-lint@v0.3.0
+  with:
+    video: out/final.mp4
+    args: --platform tiktok --lufs -14 --captions out/final.srt
+    fail-on: fail        # fail | unmeasured | never
+```
+
+Installs ffmpeg and video-lint, writes the report to the job summary, uploads the report folder as an artifact, and exposes `status` and `report-dir` outputs.
+
+会自动装 ffmpeg 和 video-lint，把报告写进 Actions 的摘要页，把报告目录作为附件上传，并提供 `status` 和 `report-dir` 两个输出。
+
+## MCP server · 给 agent 用
+
+```bash
+pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.3.0"
+claude mcp add video-lint -- video-lint-mcp
+```
+
+Tools: `lint_video(video, platform, lufs, captions, sidecar, sfx_audio, out, ocr, flash)` returns the status, every ✗ / ⚠ / ? check and the report paths; `list_platforms()` lists platforms with their zone and spec data. Works with Claude Code, Cursor and any other MCP client.
+
+工具：`lint_video` 返回整体状态、所有 ✗ / ⚠ / ? 的检查和报告路径；`list_platforms` 列出支持的平台和它们的遮挡区、规格数据。Claude Code、Cursor 和其它支持 MCP 的客户端都能用。
 
 ## Tests · 测试
 

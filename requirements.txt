@@ -1,6 +1,7 @@
 numpy>=1.24
 pillow>=10
 scipy>=1.10
+tomli>=2; python_version < "3.11"
 # 可选 optional：没有旁注的拍子网格时，从音频估拍子 / estimate beats from audio
 librosa>=0.10
 # 可选 optional：没有文字层时用 OCR 找字（遮挡区、出画、字号）/ OCR fallback for the text checks

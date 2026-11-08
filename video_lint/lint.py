@@ -14,6 +14,9 @@
 旁注格式见同目录 README.md；这一工程里用 node scripts/video-lint/run.mjs <作品ID> 自动生成旁注并调用本脚本。
 """
 import argparse
+import base64
+import html as _html
+import fnmatch
 import json
 import math
 import re
@@ -27,7 +30,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 # 「要听得见」的音效：冲击、动作音；whoosh、swish、paper、room 这类本来就轻，不查
 LOUD_DEFAULT = ['impact', 'press', 'drop', 'chime', 'bell', 'clink', 'stamp', 'coin', 'tick', 'gunshot', 'crack', 'chapter', 'footstep', 'bloom']
 ZONES_FILE = Path(__file__).with_name('zones.json')
@@ -758,11 +761,121 @@ def retention_check(r, perf, sc, fps, n):
     r.add('retention', 'info', f'发布数据：{head}', f'来源：{src}。完播率画在片尾，是近似。\n' + '\n'.join(f'  - {l}' for l in lines), rows)
 
 
+# —— 单文件 HTML 报告（图片内嵌，发给别人一个文件就能看）——
+LEVEL_NAME = {'fail': '问题', 'warn': '提醒', 'skip': '没法查', 'pass': '通过', 'info': '记录'}
+
+
+def _img_tag(path, alt):
+    if not path or not Path(path).exists():
+        return ''
+    mime = 'image/png' if str(path).endswith('.png') else 'image/jpeg'
+    data = base64.b64encode(Path(path).read_bytes()).decode('ascii')
+    return f'<figure><img src="data:{mime};base64,{data}" alt="{_html.escape(alt)}" loading="lazy"><figcaption>{_html.escape(alt)}</figcaption></figure>'
+
+
+def write_html(out, title, video, status, headline, checks, images):
+    order = {'fail': 0, 'warn': 1, 'skip': 2, 'pass': 3, 'info': 4}
+    rows = []
+    for c in sorted(checks, key=lambda c: order[c['level']]):
+        detail = _html.escape(c['detail'] or '').replace('\n', '<br>')
+        rows.append(f'<details class="chk {c["level"]}" data-level="{c["level"]}"{" open" if c["level"] in ("fail", "warn") else ""}>'
+                    f'<summary><span class="lv">{ICON[c["level"]]} {LEVEL_NAME[c["level"]]}</span>{_html.escape(c["title"])}<code>{_html.escape(c["id"])}</code></summary>'
+                    + (f'<div class="detail">{detail}</div>' if detail else '') + '</details>')
+    figs = _img_tag(images.get('frame0'), '第 0 帧（刷到时看到的）') + ''.join(_img_tag(p_, f'联系表 {i + 1}') for i, p_ in enumerate(images.get('sheets', [])))
+    figs += _img_tag(images.get('hits'), '爆点前后：−16 / −3 / −1 / +2 帧') + _img_tag(images.get('frames'), '指定帧') + _img_tag(images.get('curve'), '亮度和运动曲线')
+    counts = {k: sum(1 for c in checks if c['level'] == k) for k in order}
+    filters = ''.join(f'<label><input type="checkbox" value="{k}" checked> {ICON[k]} {LEVEL_NAME[k]} {counts[k]}</label>' for k in order if counts[k])
+    page = f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_html.escape(title)} · video-lint</title><style>
+:root{{--bg:#f6f6f4;--card:#fff;--ink:#1b1b1a;--muted:#77756f;--line:#e4e3de;--fail:#d03b3b;--warn:#c98500;--skip:#6250d6;--pass:#1b8f5a;--info:#8a8a85}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#121211;--card:#1b1b1a;--ink:#ecebe7;--muted:#9b9993;--line:#2c2c2a;--fail:#e66767;--warn:#e0a020;--skip:#9085e9;--pass:#3fbf83}}}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}}
+main{{max-width:1100px;margin:0 auto;padding:28px 16px 48px}}h1{{font-size:22px;margin:0 0 4px}}.sub{{color:var(--muted);margin:0 0 16px;word-break:break-all}}
+.status{{display:inline-block;padding:4px 12px;border-radius:999px;font-weight:600;margin-bottom:12px}}.status.fail{{background:var(--fail);color:#fff}}.status.unmeasured{{background:var(--skip);color:#fff}}.status.pass{{background:var(--pass);color:#fff}}
+.filters{{display:flex;flex-wrap:wrap;gap:12px;margin:8px 0 14px;color:var(--muted)}}
+.chk{{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--info);border-radius:8px;margin:8px 0;padding:8px 12px}}
+.chk.fail{{border-left-color:var(--fail)}}.chk.warn{{border-left-color:var(--warn)}}.chk.skip{{border-left-color:var(--skip)}}.chk.pass{{border-left-color:var(--pass)}}
+summary{{cursor:pointer;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}}.lv{{font-weight:600;white-space:nowrap}}summary code{{margin-left:auto;color:var(--muted);font-size:12px}}
+.detail{{margin-top:6px;color:var(--muted);font-size:14px;white-space:normal}}figure{{margin:16px 0}}figure img{{max-width:100%;border-radius:8px;border:1px solid var(--line)}}figcaption{{color:var(--muted);font-size:13px}}
+footer{{color:var(--muted);font-size:13px;margin-top:24px}}
+</style></head><body><main>
+<h1>{_html.escape(title)}</h1><p class="sub">{_html.escape(str(video))}</p>
+<div class="status {status}">{_html.escape(headline)}</div>
+<div class="filters">{filters}</div>
+<section id="checks">{''.join(rows)}</section>
+<h2>图</h2>{figs}
+<footer>video-lint {VERSION} · 规则全是确定性的，数值只是信号，最后的观感和听感要人确认。</footer>
+</main><script>
+document.querySelectorAll('.filters input').forEach(b=>b.onchange=()=>{{const on=[...document.querySelectorAll('.filters input:checked')].map(x=>x.value);document.querySelectorAll('.chk').forEach(c=>c.style.display=on.includes(c.dataset.level)?'':'none')}});
+</script></body></html>"""
+    (out / 'report.html').write_text(page, encoding='utf-8')
+    return out / 'report.html'
+
+
+# —— 项目配置文件 .video-lint.toml ——
+CONFIG_NAME = '.video-lint.toml'
+# 配置文件里能写的键，和命令行同名（短横线换成下划线）；路径相对配置文件所在目录
+CONFIG_KEYS = {'platform', 'lufs', 'loud', 'strict', 'no_ocr', 'no_flash', 'captions', 'sidecar', 'sfx_audio', 'out'}
+CONFIG_PATHS = {'captions', 'sidecar', 'sfx_audio', 'out'}
+
+
+def find_config(video, explicit=None):
+    """--config 指定的；否则从视频所在目录往上找 .video-lint.toml，再看当前目录"""
+    if explicit:
+        return Path(explicit)
+    for d in [Path(video).resolve().parent, *Path(video).resolve().parents, Path.cwd()]:
+        f = d / CONFIG_NAME
+        if f.is_file():
+            return f
+    return None
+
+
+def load_config(path):
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10
+        import tomli as tomllib
+    data = tomllib.loads(Path(path).read_text(encoding='utf-8'))
+    unknown = set(data) - CONFIG_KEYS - {'ignore', 'levels'}
+    if unknown:
+        raise SystemExit(f'{path}：不认识的配置项 {sorted(unknown)}（能写的：{sorted(CONFIG_KEYS | {"ignore", "levels"})}）')
+    for k in CONFIG_PATHS & set(data):
+        data[k] = str((Path(path).parent / data[k]).resolve())
+    if isinstance(data.get('loud'), list):
+        data['loud'] = ','.join(data['loud'])
+    return data
+
+
+def merge_config(a, cfg):
+    """命令行优先：命令行没给的才用配置文件里的"""
+    for k in CONFIG_KEYS & set(cfg):
+        if getattr(a, k, None) in (None, False):
+            setattr(a, k, cfg[k])
+    return a
+
+
+def apply_overrides(r, cfg):
+    """ignore：这些检查（支持通配符，如 hit.*）降成「只记录」；levels：把某项检查改成指定级别。都写进标题，报告里看得出来"""
+    ignore = cfg.get('ignore', [])
+    levels = cfg.get('levels', {})
+    for c in r.checks:
+        if any(fnmatch.fnmatchcase(c['id'], pat) for pat in ignore) and c['level'] != 'info':
+            c['title'] = f'（配置里已忽略，原为 {c["level"]}）' + c['title']
+            c['level'] = 'info'
+            continue
+        for pat, lv in levels.items():
+            if fnmatch.fnmatchcase(c['id'], pat) and lv in ICON and c['level'] != lv:
+                c['title'] = f'（配置改为 {lv}，原为 {c["level"]}）' + c['title']
+                c['level'] = lv
+                break
+
+
 def main():
     ap = argparse.ArgumentParser(prog='video-lint', description='短视频成片质检 / deterministic QA for finished short videos')
     ap.add_argument('--version', action='version', version=f'video-lint {VERSION}')
     ap.add_argument('video')
     ap.add_argument('--sidecar')
+    ap.add_argument('--config', help=f'配置文件；不给就从视频所在目录往上找 {CONFIG_NAME}')
     ap.add_argument('--out')
     ap.add_argument('--loud', help='要检查「有没有被配乐盖住」的音效名（逗号分隔，按子串匹配）')
     ap.add_argument('--lufs', type=float, help='整片响度目标（±1 以内算合格）。各风格不同：黑金 / 战术屏 −15.5、连线星图 −14、人生曲线 −10.8、口播 −16、暖纸 −19；不给就只记录')
@@ -776,6 +889,9 @@ def main():
     ap.add_argument('--text-failed', help='（run.mjs 用）文字层渲染失败的原因')
     ap.add_argument('--frames', help='另外抽这几帧拼成 frames.jpg（每行 4 格），看动画过程用：120,135=中段,150')
     a = ap.parse_args()
+    cfg_path = find_config(a.video, a.config)
+    cfg = load_config(cfg_path) if cfg_path else {}
+    merge_config(a, cfg)
 
     video = Path(a.video)
     sc = json.loads(Path(a.sidecar).read_text(encoding='utf-8')) if a.sidecar else {}
@@ -1023,6 +1139,9 @@ def main():
     images['curve'] = str(out / 'curve.png')
 
     # —— 写报告 ——
+    if cfg:
+        apply_overrides(r, cfg)
+        r.add('config', 'info', f'用了配置文件 {cfg_path}', '、'.join(f'{k}={cfg[k]}' for k in sorted(cfg) if k not in ('ignore', 'levels')) + (f'；忽略 {cfg["ignore"]}' if cfg.get('ignore') else '') + (f'；改级别 {cfg["levels"]}' if cfg.get('levels') else ''))
     order = {'fail': 0, 'warn': 1, 'skip': 2, 'pass': 3, 'info': 4}
     summary = {k: r.count(k) for k in order}
     status = 'fail' if summary['fail'] else 'unmeasured' if summary['skip'] else 'pass'
@@ -1036,6 +1155,7 @@ def main():
     md += ['', '## 图', '', f'- {images["frame0"]}（第 0 帧原尺寸，单独看：刷到时就是这一帧）'] + [f'- {p}' for p in sheets] + ([f'- {images["frames"]}（--frames 指定的帧）'] if 'frames' in images else []) +([f'- {images["hits"]}（每个爆点 −16 / −3 / −1 / +2 帧：应当是 收暗 → 静止 → 静止 → 亮起）'] if 'hits' in images else []) + [f'- {images["curve"]}', '',
            '数值只是信号，最后的观感和听感要人确认。']
     (out / 'report.md').write_text('\n'.join(md), encoding='utf-8')
+    images['html'] = str(write_html(out, f'video-lint 报告：{sc.get("id") or video.name}', video, status, headline, r.checks, images))
     (out / 'report.json').write_text(json.dumps({'tool': 'video-lint', 'version': VERSION, 'video': str(video), 'sidecar': a.sidecar, 'status': status, 'summary': summary, 'features': features, 'performance': sc.get('performance'), 'checks': r.checks, 'images': images}, ensure_ascii=False, indent=1), encoding='utf-8')
     print(f'{headline} → {out / "report.md"}')
     for c in r.checks:

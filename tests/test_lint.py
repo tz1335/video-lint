@@ -330,3 +330,66 @@ def test_reading_speed_from_srt(tmp_path):
     assert sp['level'] == 'warn'
     assert sp['data'] == {'fast': 1, 'short': 1}
     assert '开头规则 2' in r['by']['open.rule2']['title'] if 'open.rule2' in r['by'] else True
+
+
+# —— 配置文件 .video-lint.toml ——
+
+def test_config_file_sets_defaults_and_ignores_checks(tmp_path):
+    v = make_video(tmp_path / 'v.mp4', f'if(eq(N,0),0,{MOVING})', audio=TONE)  # 第 0 帧黑屏 → open.frame0 本来是 ✗
+    (tmp_path / '.video-lint.toml').write_text('platform = "tiktok"\nlufs = -14\nno_ocr = true\nignore = ["open.frame0"]\n\n[levels]\n"spec" = "info"\n', encoding='utf-8')
+    r = lint_report(v, tmp_path / 'out')
+    assert r['by']['open.frame0']['level'] == 'info' and '已忽略' in r['by']['open.frame0']['title']
+    assert r['by']['spec']['level'] == 'info'
+    assert '目标 -14' in r['by']['audio.loudness']['detail']
+    assert 'TikTok' in r['by']['spec']['title']
+    assert r['by']['config']['level'] == 'info'
+    # 命令行优先于配置文件
+    r = lint_report(v, tmp_path / 'out2', '--platform', 'shorts')
+    assert 'YouTube Shorts' in r['by']['spec']['title']
+
+
+def test_config_rejects_unknown_keys(tmp_path):
+    v = make_video(tmp_path / 'v.mp4', MOVING, seconds=1, audio=TONE)
+    cfg = tmp_path / 'x.toml'
+    cfg.write_text('platfrom = "tiktok"\n', encoding='utf-8')
+    p = subprocess.run([sys.executable, '-I', str(LINT), str(v), '--config', str(cfg), '--out', str(tmp_path / 'o')], capture_output=True, text=True, encoding='utf-8', errors='replace')
+    assert p.returncode != 0 and 'platfrom' in (p.stderr + p.stdout)
+
+
+# —— 单文件 HTML 报告 ——
+
+def test_html_report_is_self_contained(tmp_path):
+    v = make_video(tmp_path / 'v.mp4', MOVING, seconds=2, audio=TONE)
+    r = lint_report(v, tmp_path / 'out', '--no-ocr')
+    page = (tmp_path / 'out' / 'report.html').read_text(encoding='utf-8')
+    assert r['images']['html'].endswith('report.html')
+    assert 'data:image/jpeg;base64,' in page and 'data:image/png;base64,' in page  # 联系表和曲线都内嵌了
+    assert 'src="sheet' not in page and 'http' not in page.split('<footer>')[0].split('</style>')[1][:200]
+    for c in r['checks']:
+        assert c['id'] in page
+
+
+# —— MCP 服务（没装 mcp 就跳过）——
+
+def _has_mcp():
+    try:
+        import mcp  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@pytest.mark.skipif(not _has_mcp(), reason='没装 mcp')
+def test_mcp_tools(tmp_path):
+    try:
+        from video_lint import mcp_server
+    except ImportError:
+        import mcp_server
+    v = make_video(tmp_path / 'v.mp4', f'if(eq(N,0),0,{MOVING})', seconds=2, audio=TONE)
+    res = mcp_server.lint_video(str(v), platform='tiktok', ocr=False)
+    assert res['status'] == 'fail'
+    assert any(p['id'] == 'open.frame0' for p in res['problems'])
+    assert Path(res['report_html']).exists()
+    assert mcp_server.lint_video(str(tmp_path / 'nope.mp4')) == {'error': f'找不到视频：{(tmp_path / "nope.mp4").resolve()}'}
+    plats = mcp_server.list_platforms()['platforms']
+    assert {'douyin', 'tiktok', 'reels', 'shorts'} <= set(plats)

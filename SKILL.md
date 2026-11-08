@@ -10,7 +10,7 @@ Checks a rendered video with fixed rules and writes a report you can act on. It 
 ## Run it
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.1.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.3.0"
 video-lint final.mp4 --out lint-report
 video-lint final.mp4 --sidecar sidecar.json --platform tiktok --lufs -14 --strict
 # 不安装：pip install -r requirements.txt && python -I lint.py final.mp4
@@ -64,6 +64,9 @@ A sidecar JSON unlocks the timing checks. Times are in **frames**, the beat grid
 
 - `--captions file.srt|.vtt|.ass` → caption reading speed (Netflix: ≤ 9 CJK chars/s, ≤ 20 Latin chars/s, ≥ 5/6 s on screen) and the opening-line rules, without a sidecar
 - Upload spec for `--platform` (codec, pixel format, fps, resolution, aspect, duration limit, audio) warns only; values live in `video_lint/specs.json`
+- `.video-lint.toml` (next to the video or above) sets defaults — platform, lufs, loud, captions, ignore = [check ids, globs ok], [levels] overrides; flags win
+- `report.html` is written every run: one self-contained file to hand to a person
+- MCP: `video-lint-mcp` exposes `lint_video` and `list_platforms` (install the `[mcp]` extra)
 - Flashing (WCAG 2.3.1): more than 3 flashes, or 3 red flashes, in any one second over ~11% of the frame → fail; `--no-flash` skips it
 - Frame 0: near-black → fail; under 0.5% of pixels brighter than 60/255 → fail
 - Text size on frame 0: line height ÷ video **width** (both orientations fill the phone width) — under 2.5% fail, under 4% warn

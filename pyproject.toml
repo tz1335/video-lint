@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 authors = [{name = "Tong Zhao"}]
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "pillow>=10", "scipy>=1.10"]
+dependencies = ["numpy>=1.24", "pillow>=10", "scipy>=1.10", "tomli>=2; python_version < '3.11'"]
 keywords = ["video", "qa", "lint", "short-video", "tiktok", "douyin", "safe-zone", "remotion"]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -21,10 +21,12 @@ classifiers = [
 [project.optional-dependencies]
 ocr = ["rapidocr-onnxruntime"]
 beats = ["librosa>=0.10"]
-all = ["rapidocr-onnxruntime", "librosa>=0.10"]
+mcp = ["mcp>=1.2"]
+all = ["rapidocr-onnxruntime", "librosa>=0.10", "mcp>=1.2"]
 
 [project.scripts]
 video-lint = "video_lint.lint:main"
+video-lint-mcp = "video_lint.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/tz1335/video-lint"

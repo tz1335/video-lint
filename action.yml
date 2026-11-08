@@ -1,0 +1,75 @@
+name: video-lint
+description: Deterministic QA for finished short videos — first frame, UI safe zones, flashing, upload spec, cut-on-beat, loudness, buried sound effects.
+author: Tong Zhao
+branding:
+  icon: film
+  color: orange
+
+inputs:
+  video:
+    description: Path to the video to check (relative to the workspace).
+    required: true
+  args:
+    description: Extra video-lint arguments, e.g. "--platform tiktok --lufs -14 --captions final.srt".
+    default: ''
+  ocr:
+    description: Install RapidOCR so text checks work without a text layer ("true" / "false").
+    default: 'true'
+  fail-on:
+    description: When to fail the step — "fail" (any ✗), "unmeasured" (✗ or something could not be checked) or "never".
+    default: fail
+  python-version:
+    default: '3.12'
+
+outputs:
+  status:
+    description: pass, fail or unmeasured.
+    value: ${{ steps.lint.outputs.status }}
+  report-dir:
+    description: Folder with report.md, report.html, report.json and images.
+    value: ${{ steps.lint.outputs.report-dir }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install ffmpeg
+      shell: bash
+      run: |
+        if command -v ffmpeg >/dev/null; then exit 0; fi
+        case "$RUNNER_OS" in
+          Linux) sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg ;;
+          macOS) brew install ffmpeg ;;
+          Windows) choco install ffmpeg -y --no-progress ;;
+        esac
+    - name: Install video-lint
+      shell: bash
+      run: |
+        if [ "${{ inputs.ocr }}" = "true" ]; then pip install "${{ github.action_path }}[ocr]"; else pip install "${{ github.action_path }}"; fi
+    - id: lint
+      name: Run video-lint
+      shell: bash
+      run: |
+        out="$RUNNER_TEMP/video-lint"
+        set +e
+        video-lint "${{ inputs.video }}" --out "$out" --strict ${{ inputs.args }}
+        code=$?
+        set -e
+        if [ $code -eq 1 ] || [ ! -f "$out/report.json" ]; then echo "video-lint crashed (exit $code)"; exit 1; fi
+        status=$(python -c "import json,sys; print(json.load(open(sys.argv[1], encoding='utf-8'))['status'])" "$out/report.json")
+        echo "status=$status" >> "$GITHUB_OUTPUT"
+        echo "report-dir=$out" >> "$GITHUB_OUTPUT"
+        cat "$out/report.md" >> "$GITHUB_STEP_SUMMARY"
+        case "${{ inputs.fail-on }}" in
+          never) exit 0 ;;
+          unmeasured) [ "$status" = "pass" ] || exit 1 ;;
+          *) [ "$status" != "fail" ] || exit 1 ;;
+        esac
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: video-lint-report
+        path: ${{ runner.temp }}/video-lint
+        if-no-files-found: ignore

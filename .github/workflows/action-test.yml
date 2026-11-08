@@ -1,0 +1,28 @@
+# 自测这个仓库的 GitHub Action：现场生成一段测试视频，用 uses: ./ 跑一遍
+name: action
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Make a test video
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          ffmpeg -v error -f lavfi -i testsrc2=size=540x960:rate=30:duration=4 -f lavfi -i sine=frequency=440:duration=4 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest test.mp4
+      - id: lint
+        uses: ./
+        with:
+          video: test.mp4
+          args: --platform tiktok
+          ocr: 'false'
+          fail-on: never
+      - name: Check outputs
+        run: |
+          echo "status=${{ steps.lint.outputs.status }}"
+          test -n "${{ steps.lint.outputs.status }}"
+          test -f "${{ steps.lint.outputs.report-dir }}/report.html"

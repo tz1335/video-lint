@@ -33,4 +33,5 @@ jobs:
       # 按用户的装法装（pyproject.toml），顺带验证打包和 video-lint 命令
       - run: pip install ".[all]" pytest==8.3.5
       - run: video-lint --version
+      - run: video-lint-mcp --help || true
       - run: python -m pytest tests -q
