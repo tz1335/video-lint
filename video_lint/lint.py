@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = '0.1.0'
+VERSION = '0.2.0.dev0'
 # 「要听得见」的音效：冲击、动作音；whoosh、swish、paper、room 这类本来就轻，不查
 LOUD_DEFAULT = ['impact', 'press', 'drop', 'chime', 'bell', 'clink', 'stamp', 'coin', 'tick', 'gunshot', 'crack', 'chapter', 'footstep', 'bloom']
 ZONES_FILE = Path(__file__).with_name('zones.json')
@@ -387,6 +387,95 @@ def shot_at(shots, f):
     return next((s['name'] for s in shots if s['from'] <= f < s['to']), '片尾' if f >= shots[-1]['to'] else '—')
 
 
+# —— 闪烁安全（WCAG 2.3.1 三次闪烁阈值）——
+# 一次「闪烁」= 一对方向相反的亮度变化：相对亮度变化 ≥ 10%，且较暗的一边低于 0.80。
+# 一秒内超过 3 次闪烁、闪烁面积又足够大，就可能诱发光敏性癫痫。面积阈值取 WCAG 的近似：
+# 1024×768 屏幕上 341×256 像素，约占画面 11%。这里把整帧里同方向变化的像素加起来算面积（WCAG 说的是任意 10° 视野内），
+# 会比标准略严，宁可多报。红色闪烁：其中一边是饱和红（R/(R+G+B) ≥ 0.8），且 (R−G−B)×320 变化 > 20。
+FLASH_AREA = 341 * 256 / (1024 * 768)
+
+
+def _linear(c):
+    c = c / 255.0
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def flash_events(video, w, h, fps):
+    """逐帧找「大面积同方向的亮度跳变」和「红色跳变」，返回 [(帧, +1/-1)] 两组。每个像素用滞回跟踪：
+    从上一个极值变化够了才算一次跳变，慢慢淡入淡出不会被拆成很多次。"""
+    sw = 96 if w >= h else 54
+    sh = max(2, round(h * sw / w / 2) * 2)
+    raw = run(['ffmpeg', '-v', 'error', '-i', str(video), '-vf', f'scale={sw}:{sh}:flags=area,format=rgb24', '-fps_mode', 'passthrough', '-f', 'rawvideo', '-']).stdout
+    frames = np.frombuffer(raw, np.uint8).reshape(-1, sh * sw, 3).astype(np.float32)
+    lum_ext = red_ext = red_sat = lum_dir = red_dir = None
+    lum_ev, red_ev = [], []
+    for t, px in enumerate(frames):
+        L = 0.2126 * _linear(px[:, 0]) + 0.7152 * _linear(px[:, 1]) + 0.0722 * _linear(px[:, 2])
+        rgb = px / 255.0
+        total = rgb.sum(axis=1) + 1e-6
+        sat = rgb[:, 0] / total >= 0.8
+        red = np.clip((rgb[:, 0] - rgb[:, 1] - rgb[:, 2]) * 320, 0, None)
+        if lum_ext is None:
+            lum_ext, lum_dir = L.copy(), np.zeros_like(L)
+            red_ext, red_sat, red_dir = red.copy(), sat.copy(), np.zeros_like(red)
+            continue
+        # 亮度：离上一个极值 ≥ 0.1，且较暗的一边 < 0.8
+        d = L - lum_ext
+        dark_ok = np.minimum(L, lum_ext) < 0.8
+        up = (d >= 0.1) & dark_ok & (lum_dir <= 0)
+        down = (d <= -0.1) & dark_ok & (lum_dir >= 0)
+        cont = ((lum_dir > 0) & (L > lum_ext)) | ((lum_dir < 0) & (L < lum_ext))
+        lum_ext = np.where(up | down | cont, L, lum_ext)
+        lum_dir = np.where(up, 1, np.where(down, -1, lum_dir))
+        if up.mean() >= FLASH_AREA:
+            lum_ev.append((t, 1))
+        if down.mean() >= FLASH_AREA:
+            lum_ev.append((t, -1))
+        # 红色：(R−G−B)×320 离上一个极值 > 20，且两边至少一边是饱和红
+        d = red - red_ext
+        ok = sat | red_sat
+        up = (d > 20) & ok & (red_dir <= 0)
+        down = (d < -20) & ok & (red_dir >= 0)
+        cont = ((red_dir > 0) & (red > red_ext)) | ((red_dir < 0) & (red < red_ext))
+        moved = up | down | cont
+        red_ext = np.where(moved, red, red_ext)
+        red_sat = np.where(moved, sat, red_sat)
+        red_dir = np.where(up, 1, np.where(down, -1, red_dir))
+        if up.mean() >= FLASH_AREA:
+            red_ev.append((t, 1))
+        if down.mean() >= FLASH_AREA:
+            red_ev.append((t, -1))
+    return lum_ev, red_ev
+
+
+def flash_windows(events, fps):
+    """任意 1 秒窗口里的跳变数；超过 6 次（= 超过 3 次闪烁）的窗口合并成时间段。返回 (最多的跳变数, [(起帧, 止帧, 次数)])"""
+    ts = [t for t, _ in events]
+    worst, bad = 0, []
+    for i, t0 in enumerate(ts):
+        k = sum(1 for t in ts[i:] if t < t0 + fps)
+        worst = max(worst, k)
+        if k > 6:
+            end = max(t for t in ts[i:] if t < t0 + fps)
+            if bad and t0 <= bad[-1][1]:
+                bad[-1] = (bad[-1][0], max(bad[-1][1], end), max(bad[-1][2], k))
+            else:
+                bad.append((t0, end, k))
+    return worst, bad
+
+
+def flash_check(r, video, P, fps, shots):
+    lum_ev, red_ev = flash_events(video, P['width'], P['height'], fps)
+    for key, name, ev in (('flash', '闪烁', lum_ev), ('flash.red', '红色闪烁', red_ev)):
+        worst, bad = flash_windows(ev, fps)
+        if bad:
+            rows = '\n'.join(f'  - {a / fps:.2f}–{b / fps:.2f} 秒（{shot_at(shots, a)}）：1 秒内 {k} 次大面积{name[:-2] or ""}跳变 ≈ {k / 2:.1f} 次闪烁' for a, b, k in bad)
+            r.add(key, 'fail', f'{name}超过每秒 3 次：{len(bad)} 段', '标准 WCAG 2.3.1：任意 1 秒内不超过 3 次闪烁（面积按整帧约 11% 算，比标准略严）。可能诱发光敏性癫痫，把闪白 / 硬切拉开到 1 秒 3 次以内，或者缩小闪烁面积。\n' + rows,
+                  [{'from': a, 'to': b, 'transitions': k} for a, b, k in bad])
+        else:
+            r.add(key, 'pass', f'没有超标的{name}', f'任意 1 秒内最多 {worst} 次大面积跳变（{worst / 2:.1f} 次闪烁），标准是不超过 3 次闪烁', {'maxTransitionsPerSecond': worst})
+
+
 def audio_mono(video, sr=48000):
     raw = run(['ffmpeg', '-v', 'error', '-i', str(video), '-vn', '-ac', '1', '-ar', str(sr), '-f', 'f32le', '-']).stdout
     return np.frombuffer(raw, np.float32), sr
@@ -564,6 +653,7 @@ def main():
     ap.add_argument('--platform', choices=['douyin', 'tiktok', 'reels', 'shorts', 'none'], help='竖屏联系表叠哪个平台的界面，默认取旁注的 platform（没有就是 douyin）')
     ap.add_argument('--sfx-audio', help='只有音效的分轨（wav，或者「无配乐仅音效」版 mp4）；有它就用音效 / 配乐能量比判断听不听得见')
     ap.add_argument('--text-dir',help='文字层 PNG 目录（textlayer.mjs 的输出），有它才自动查遮挡区和出画')
+    ap.add_argument('--no-flash', action='store_true', help='不做闪烁安全检查（WCAG 2.3.1）')
     ap.add_argument('--no-ocr', action='store_true', help='没有文字层时也不用 OCR 找字')
     ap.add_argument('--text-failed', help='（run.mjs 用）文字层渲染失败的原因')
     ap.add_argument('--frames', help='另外抽这几帧拼成 frames.jpg（每行 4 格），看动画过程用：120,135=中段,150')
@@ -634,6 +724,10 @@ def main():
         early = [s for s in stills if s[0] < 3 * fps]
         r.add('static', 'warn' if early else 'info', '画面几乎不动超过 1 秒的段' + ('（前 3 秒就有）' if early else ''),
               '；'.join(f'{s / fps:.2f}–{e / fps:.2f} 秒（{shot_at(sc.get("shots", []), s)}）' for s, e in stills), [[s, e] for s, e in stills])
+
+    # —— 闪烁安全 ——
+    if not a.no_flash:
+        flash_check(r, video, P, fps, sc.get('shots') or [])
 
     # —— 爆点：收暗 → 静止 → 亮起 ——
     hit_tiles = []

@@ -62,6 +62,7 @@ A sidecar JSON unlocks the timing checks. Times are in **frames**, the beat grid
 
 ## Thresholds worth knowing
 
+- Flashing (WCAG 2.3.1): more than 3 flashes, or 3 red flashes, in any one second over ~11% of the frame → fail; `--no-flash` skips it
 - Frame 0: near-black → fail; under 0.5% of pixels brighter than 60/255 → fail
 - Text size on frame 0: line height ÷ video **width** (both orientations fill the phone width) — under 2.5% fail, under 4% warn
 - UI zones: TikTok / Reels / Shorts numbers from reelsmith/safezone (MIT, see THIRD_PARTY.md); Douyin reuses TikTok

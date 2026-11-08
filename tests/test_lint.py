@@ -234,3 +234,52 @@ def test_no_ocr_flag_falls_back_to_info(tmp_path):
     v = make_video(tmp_path / 'v.mp4', MOVING, w=180, h=320, seconds=2, audio=TONE)
     r = lint_report(v, tmp_path / 'out', '--no-ocr')
     assert r['by']['text']['level'] == 'info'
+
+
+# —— 闪烁安全（WCAG 2.3.1）——
+
+def make_rgb_video(path, frames):
+    """frames: (n, h, w, 3) uint8，逐帧原样编码（无损，免得压缩把闪烁抹平）"""
+    n, h, w, _ = frames.shape
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{w}x{h}', '-r', str(FPS), '-i', '-',
+                    '-c:v', 'libx264rgb', '-crf', '0', str(path)], input=frames.tobytes(), check=True)
+    return path
+
+
+def flicker(hz, color=(255, 255, 255), area=1.0, seconds=3, w=160, h=90):
+    """前景色和黑色交替，每秒 hz 次完整闪烁；area 是闪烁区域占画面的比例（左上角一块）"""
+    n = seconds * FPS
+    half = FPS / hz / 2
+    frames = np.zeros((n, h, w, 3), np.uint8)
+    frames[:] = (40, 40, 40)
+    bw, bh = int(w * math.sqrt(area)), int(h * math.sqrt(area))
+    for i in range(n):
+        if int(i // half) % 2 == 0:
+            frames[i, :bh, :bw] = color
+        else:
+            frames[i, :bh, :bw] = (0, 0, 0)
+    return frames
+
+
+@pytest.mark.parametrize('hz,area,expect', [(5, 1.0, 'fail'), (2, 1.0, 'pass'), (5, 0.05, 'pass')])
+def test_flash_general(tmp_path, hz, area, expect):
+    v = make_rgb_video(tmp_path / 'f.mkv', flicker(hz, area=area))
+    r = lint_report(v, tmp_path / 'out', '--no-ocr')
+    assert r['by']['flash']['level'] == expect, r['by']['flash']['detail']
+
+
+def test_flash_red_detected_separately(tmp_path):
+    v = make_rgb_video(tmp_path / 'red.mkv', flicker(5, color=(230, 10, 10)))
+    r = lint_report(v, tmp_path / 'out', '--no-ocr')
+    assert r['by']['flash.red']['level'] == 'fail'
+
+
+def test_slow_fade_is_not_a_flash(tmp_path):
+    n = 3 * FPS
+    frames = np.zeros((n, 90, 160, 3), np.uint8)
+    for i in range(n):  # 3 秒里从黑慢慢变白再变回来，只算两次跳变
+        frames[i] = int(255 * (1 - abs(i / (n - 1) * 2 - 1)))
+    v = make_rgb_video(tmp_path / 'fade.mkv', frames)
+    r = lint_report(v, tmp_path / 'out', '--no-ocr')
+    assert r['by']['flash']['level'] == 'pass'
+    assert r['by']['flash']['data']['maxTransitionsPerSecond'] <= 2
