@@ -10,17 +10,42 @@ It started inside a Remotion project that makes short explainer videos; every ru
 
 它最早是在一个用 Remotion 做知识短视频的工程里写出来的。每一条规则都来自一支真实发布过的视频和它的留存数据，`lint.py` 里每条规则旁边都写了来由。
 
+## Install · 安装
+
+```bash
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.1.0"
+video-lint final.mp4
+```
+
+`[ocr]` adds RapidOCR for the text checks on any video; drop it for a lighter install. `[beats]` adds librosa for estimating the beat grid from audio; `[all]` installs both. Plain `pip install` works the same way. Requires `ffmpeg` / `ffprobe` on PATH.
+
+`[ocr]` 会装上 RapidOCR，对任何视频都能做文字检查；不要的话去掉它，装起来更轻。`[beats]` 装 librosa，用来从音频估拍子网格；`[all]` 两个都装。用普通的 `pip install` 也一样。需要 `ffmpeg` / `ffprobe` 在 PATH 里。
+
+Without installing, from a clone: `pip install -r requirements.txt`, then `python -I lint.py final.mp4`.
+
+不想安装的话，克隆仓库后 `pip install -r requirements.txt`，再 `python -I lint.py final.mp4` 也能跑。
+
 ## Quick start · 快速开始
 
 ```bash
-pip install -r requirements.txt     # numpy, pillow, scipy; librosa is optional (beat estimation)
-python -I lint.py final.mp4
-python -I lint.py final.mp4 --sidecar examples/sidecar.example.json --platform tiktok --strict
+video-lint final.mp4                                   # report in final-lint/
+video-lint final.mp4 --platform tiktok --lufs -14 --strict
+video-lint final.mp4 --sidecar examples/sidecar.example.json --out report/
 ```
 
-Requires `ffmpeg` / `ffprobe` on PATH. For the text checks on any video, also `pip install rapidocr-onnxruntime`: without a text layer, video-lint finds text with OCR (it can miss tiny, stylised or low-contrast text, so "no text on frame 0" from OCR is only a warning). See `SKILL.md` for the full option list, the sidecar format, and how to read `report.json`. `SKILL.md` follows the Agent Skills format, so this folder can be dropped into any agent that supports skills.
+![A contact sheet from video-lint: Douyin UI zones in red, the safe area dashed in green, detected text lines in cyan](docs/example-sheet.jpg)
 
-需要 `ffmpeg` / `ffprobe` 在 PATH 里。想对任何视频做文字检查，再装 `pip install rapidocr-onnxruntime`：没有文字层时 video-lint 会用 OCR 找字（很小、艺术字、低对比的字可能漏掉，所以 OCR 判出的「第 0 帧没有字」只给 ⚠）。完整参数、旁注（sidecar）格式、`report.json` 怎么读，见 `SKILL.md`。`SKILL.md` 按 Agent Skills 格式写，所以整个目录可以直接放进任何支持 skill 的 agent 里用。`librosa` 是可选的，只在没有旁注拍子网格、要从音频估拍子时用到。
+*Part of a contact sheet: Douyin's UI zones in red, the recommended safe area dashed in green, detected text lines in cyan. The hook at the top sits under the top bar and the second caption line sits in the caption area, both flagged in `report.md`.*
+
+*联系表的一部分：红框是抖音界面遮挡区，绿色虚线是推荐安全区，青框是识别出的文字行。顶部的钩子压在顶栏下面，第二行小字幕落在文案区里，`report.md` 里都判了出来。*
+
+Outputs (`--out`, default `<video>-lint/`): `report.md` for people, `report.json` for agents, `sheet-*.jpg` contact sheets, `frame0.jpg`, `hits.jpg`, `curve.png`. See `SKILL.md` for every option, the sidecar format and how to read `report.json`. `SKILL.md` follows the Agent Skills format, so this folder can be dropped into any agent that supports skills.
+
+输出（`--out`，默认 `<视频名>-lint/`）：给人看的 `report.md`、给 agent 读的 `report.json`、联系表 `sheet-*.jpg`、`frame0.jpg`、`hits.jpg`、`curve.png`。全部参数、旁注格式、`report.json` 怎么读，见 `SKILL.md`。`SKILL.md` 按 Agent Skills 格式写，整个目录可以直接放进任何支持 skill 的 agent 里用。
+
+Without a text layer, text is found with OCR when `[ocr]` is installed (it can miss tiny, stylised or low-contrast text, so "no text on frame 0" from OCR is only a warning).
+
+没有文字层时，装了 `[ocr]` 就用 OCR 找字（很小、艺术字、低对比的字可能漏掉，所以 OCR 判出的「第 0 帧没有字」只给 ⚠）。
 
 ## Tests · 测试
 
@@ -49,9 +74,9 @@ The tests synthesise small videos with known answers using ffmpeg (a black first
 
 ## Platforms · 平台
 
-UI zone data ships for three platforms (`--platform`); the numbers come from [reelsmith/safezone](https://github.com/reelsmith/safezone) and are approximations averaged over recent iOS and Android phones.
+UI zone data ships for three platforms (`--platform`, data in `video_lint/zones.json`); the numbers come from [reelsmith/safezone](https://github.com/reelsmith/safezone) and are approximations averaged over recent iOS and Android phones.
 
-自带三个平台的界面遮挡区数据（`--platform`），数字取自 [reelsmith/safezone](https://github.com/reelsmith/safezone)，是近几年 iOS 和安卓手机的平均近似值。
+自带三个平台的界面遮挡区数据（`--platform`，数据在 `video_lint/zones.json`），数字取自 [reelsmith/safezone](https://github.com/reelsmith/safezone)，是近几年 iOS 和安卓手机的平均近似值。
 
 | `--platform` | Platform · 平台 | Status · 状态 |
 |---|---|---|
@@ -60,9 +85,9 @@ UI zone data ships for three platforms (`--platform`); the numbers come from [re
 | `shorts` | YouTube Shorts | supported · 已支持 |
 | `none` | — | no zones (landscape, or any other player)<br>不画遮挡区（横屏视频，或其它播放器） |
 
-Other platforms where the same checks are useful. Everything except the UI zones already works on them today; adding a platform only needs its zone rectangles in `zones.json` (measure a screenshot of the feed on a phone).
+Other platforms where the same checks are useful. Everything except the UI zones already works on them today; adding a platform only needs its zone rectangles in `video_lint/zones.json` (measure a screenshot of the feed on a phone).
 
-下面这些平台同样用得上。除了界面遮挡区，其它检查现在就能直接用；要加一个平台，只需要在 `zones.json` 里补上它的遮挡区矩形（拿手机截一张信息流的图量出来）。
+下面这些平台同样用得上。除了界面遮挡区，其它检查现在就能直接用；要加一个平台，只需要在 `video_lint/zones.json` 里补上它的遮挡区矩形（拿手机截一张信息流的图量出来）。
 
 | Platform · 平台 | Feed format · 主要画幅 | Notes · 说明 |
 |---|---|---|

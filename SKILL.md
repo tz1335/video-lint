@@ -10,9 +10,10 @@ Checks a rendered video with fixed rules and writes a report you can act on. It 
 ## Run it
 
 ```bash
-pip install -r requirements.txt            # numpy, pillow, scipy (+ librosa, optional)
-python -I lint.py final.mp4 --out lint-report
-python -I lint.py final.mp4 --sidecar sidecar.json --platform tiktok --lufs -14 --strict
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.1.0"
+video-lint final.mp4 --out lint-report
+video-lint final.mp4 --sidecar sidecar.json --platform tiktok --lufs -14 --strict
+# 不安装：pip install -r requirements.txt && python -I lint.py final.mp4
 ```
 
 Needs `ffmpeg` and `ffprobe` on PATH.

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-lint"
+dynamic = ["version"]
+description = "Deterministic QA for finished short videos: first frame, UI safe zones, cut-on-beat, loudness, buried sound effects."
+readme = "README.md"
+license = "MIT"
+authors = [{name = "Tong Zhao"}]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pillow>=10", "scipy>=1.10"]
+keywords = ["video", "qa", "lint", "short-video", "tiktok", "douyin", "safe-zone", "remotion"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Video",
+  "Environment :: Console",
+]
+
+[project.optional-dependencies]
+ocr = ["rapidocr-onnxruntime"]
+beats = ["librosa>=0.10"]
+all = ["rapidocr-onnxruntime", "librosa>=0.10"]
+
+[project.scripts]
+video-lint = "video_lint.lint:main"
+
+[project.urls]
+Homepage = "https://github.com/tz1335/video-lint"
+
+[tool.setuptools]
+packages = ["video_lint"]
+
+[tool.setuptools.package-data]
+video_lint = ["zones.json"]
+
+[tool.setuptools.dynamic]
+version = {attr = "video_lint.lint.VERSION"}

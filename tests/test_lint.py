@@ -15,9 +15,12 @@ import pytest
 from PIL import Image
 
 HERE = Path(__file__).resolve().parent
-LINT = HERE.parent / 'lint.py'
+LINT = HERE.parent / 'lint.py'  # 原工程里是分析器本身；独立仓库里是调用 video_lint 包的小入口
 sys.path.insert(0, str(HERE.parent))
-import lint  # noqa: E402
+try:  # 独立仓库：代码在 video_lint 包里
+    from video_lint import lint  # noqa: E402
+except ImportError:  # 原工程：lint.py 就在上一级
+    import lint  # noqa: E402
 
 FPS = 30
 
@@ -76,8 +79,9 @@ def test_platform_zones_douyin_reuses_tiktok():
 
 
 def test_merge_lines_joins_pieces_of_one_line_only():
-    a, b, c = [0.1, 0.50, 0.3, 0.53], [0.4, 0.505, 0.6, 0.535], [0.1, 0.70, 0.5, 0.73]
-    assert lint.merge_lines([a, b, c]) == [[0.1, 0.5, 0.6, 0.535], c]
+    # a、b 同一行、隔 0.04（不到两个字高）→ 合成一行；c 是下一行；d 和 a 同高但隔了半个画面 → 不合
+    a, b, c, d = [0.1, 0.50, 0.3, 0.53], [0.34, 0.505, 0.6, 0.535], [0.1, 0.70, 0.5, 0.73], [0.85, 0.50, 0.95, 0.53]
+    assert lint.merge_lines([a, b, c, d]) == [[0.1, 0.5, 0.6, 0.535], d, c]
 
 
 def test_magenta_matches_dimmed_magenta_not_gold_or_gray():

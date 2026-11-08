@@ -30,5 +30,7 @@ jobs:
       - name: Install ffmpeg (Windows)
         if: runner.os == 'Windows'
         run: choco install ffmpeg -y --no-progress
-      - run: pip install -r requirements.txt rapidocr-onnxruntime pytest==8.3.5
+      # 按用户的装法装（pyproject.toml），顺带验证打包和 video-lint 命令
+      - run: pip install ".[all]" pytest==8.3.5
+      - run: video-lint --version
       - run: python -m pytest tests -q
