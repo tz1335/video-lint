@@ -30,7 +30,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = '0.3.0'
+VERSION = '0.4.0'
 # 「要听得见」的音效：冲击、动作音；whoosh、swish、paper、room 这类本来就轻，不查
 LOUD_DEFAULT = ['impact', 'press', 'drop', 'chime', 'bell', 'clink', 'stamp', 'coin', 'tick', 'gunshot', 'crack', 'chapter', 'footstep', 'bloom']
 ZONES_FILE = Path(__file__).with_name('zones.json')
@@ -761,6 +761,63 @@ def retention_check(r, perf, sc, fps, n):
     r.add('retention', 'info', f'发布数据：{head}', f'来源：{src}。完播率画在片尾，是近似。\n' + '\n'.join(f'  - {l}' for l in lines), rows)
 
 
+# —— 手机外放（单声道）——
+def mono_check(r, video, fps):
+    """手机外放、蓝牙小音箱常常把左右声道混成一个。相位相反的部分会互相抵消，声音突然变小甚至消失。
+    比较「左右相加」和「左右各自」的能量：完全一样是 0 dB，普通立体声约 −3 dB，越往下抵消越多。"""
+    try:
+        raw = run(['ffmpeg', '-v', 'error', '-i', str(video), '-vn', '-ac', '2', '-ar', '48000', '-f', 'f32le', '-']).stdout
+    except subprocess.CalledProcessError:
+        return  # 没有音轨
+    x = np.frombuffer(raw, np.float32).reshape(-1, 2).astype(np.float64)
+    if not len(x):
+        return
+    L, R = x[:, 0], x[:, 1]
+    if np.allclose(L, R, atol=1e-4):
+        r.add('mono', 'pass', '左右声道一样，外放混成单声道不会变小')
+        return
+    loss = lambda l, rr: 10 * math.log10((np.mean(((l + rr) / 2) ** 2) + 1e-12) / (np.mean((l ** 2 + rr ** 2) / 2) + 1e-12))
+    total = loss(L, R)
+    sr, bad = 48000, []
+    for i in range(0, len(L) - sr // 2, sr // 2):  # 半秒一窗
+        l, rr = L[i:i + sr // 2], R[i:i + sr // 2]
+        if 10 * math.log10(np.mean((l ** 2 + rr ** 2) / 2) + 1e-12) < -40:
+            continue  # 太安静的段不算
+        d = loss(l, rr)
+        if d < -9:
+            bad.append((i / sr, d))
+    corr = float(np.corrcoef(L, R)[0, 1]) if np.std(L) > 0 and np.std(R) > 0 else 1.0
+    lv = 'warn' if total < -4.5 or bad else 'pass'
+    rows = '\n'.join(f'  - {t:.1f} 秒：混成单声道小了 {-d:.0f} dB' for t, d in bad[:15])
+    r.add('mono', lv, f'混成单声道（手机外放）：整片小 {-total:.1f} dB' + (f'，{len(bad)} 段明显被抵消' if bad else ''),
+          f'左右声道相关系数 {corr:.2f}（1 = 完全一样，0 = 互不相关，负数 = 相位相反）。普通立体声混成单声道约小 3 dB；整片超过 4.5 dB 或某段超过 9 dB 就要查是不是有反相的声音（加宽效果、反相的音效、立体声混响）。'
+          + ('\n' + rows if rows else ''), {'lossDb': round(total, 2), 'correlation': round(corr, 3), 'segments': [[round(t, 2), round(d, 1)] for t, d in bad]})
+
+
+# —— 和上一版比（--compare）——
+def compare_reports(old_checks, new_checks):
+    """按检查 id 对比两版：修好了（以前 ✗ ⚠，现在没有了或通过）、新出现（以前没有或通过，现在 ✗ ⚠）、还在"""
+    bad = ('fail', 'warn')
+    old = {c['id']: c for c in old_checks}
+    new = {c['id']: c for c in new_checks}
+    fixed = [old[i] for i in old if old[i]['level'] in bad and (i not in new or new[i]['level'] not in bad)]
+    added = [new[i] for i in new if new[i]['level'] in bad and (i not in old or old[i]['level'] not in bad)]
+    still = [new[i] for i in new if new[i]['level'] in bad and i in old and old[i]['level'] in bad]
+    return fixed, added, still
+
+
+def compare_check(r, path):
+    p_ = Path(path)
+    p_ = p_ / 'report.json' if p_.is_dir() else p_
+    old = json.loads(p_.read_text(encoding='utf-8'))
+    fixed, added, still = compare_reports(old['checks'], r.checks)
+    fmt = lambda cs, mark: '\n'.join(f'  - {mark} {c["title"]}' for c in cs)
+    lv = 'warn' if added else 'pass' if fixed or not still else 'info'
+    r.add('compare', lv, f'和上一版比：修好 {len(fixed)} 项、新出现 {len(added)} 项、还剩 {len(still)} 项',
+          f'上一版：{old.get("video")}（{p_}）' + ''.join(f'\n{name}：\n{fmt(cs, mark)}' for name, cs, mark in (('修好了', fixed, '✓'), ('新出现', added, '✗'), ('还在', still, '·')) if cs),
+          {'fixed': [c['id'] for c in fixed], 'added': [c['id'] for c in added], 'still': [c['id'] for c in still], 'previous': str(p_)})
+
+
 # —— 单文件 HTML 报告（图片内嵌，发给别人一个文件就能看）——
 LEVEL_NAME = {'fail': '问题', 'warn': '提醒', 'skip': '没法查', 'pass': '通过', 'info': '记录'}
 
@@ -815,8 +872,8 @@ document.querySelectorAll('.filters input').forEach(b=>b.onchange=()=>{{const on
 # —— 项目配置文件 .video-lint.toml ——
 CONFIG_NAME = '.video-lint.toml'
 # 配置文件里能写的键，和命令行同名（短横线换成下划线）；路径相对配置文件所在目录
-CONFIG_KEYS = {'platform', 'lufs', 'loud', 'strict', 'no_ocr', 'no_flash', 'captions', 'sidecar', 'sfx_audio', 'out'}
-CONFIG_PATHS = {'captions', 'sidecar', 'sfx_audio', 'out'}
+CONFIG_KEYS = {'compare', 'platform', 'lufs', 'loud', 'strict', 'no_ocr', 'no_flash', 'captions', 'sidecar', 'sfx_audio', 'out'}
+CONFIG_PATHS = {'compare', 'captions', 'sidecar', 'sfx_audio', 'out'}
 
 
 def find_config(video, explicit=None):
@@ -884,6 +941,7 @@ def main():
     ap.add_argument('--sfx-audio', help='只有音效的分轨（wav，或者「无配乐仅音效」版 mp4）；有它就用音效 / 配乐能量比判断听不听得见')
     ap.add_argument('--text-dir',help='文字层 PNG 目录（textlayer.mjs 的输出），有它才自动查遮挡区和出画')
     ap.add_argument('--captions', help='字幕文件（.srt / .vtt / .ass），用来查阅读速度、开头第一句；会覆盖旁注里的字幕')
+    ap.add_argument('--compare', help='上一版的 report.json（或报告目录）：列出修好了、新出现、还在的问题')
     ap.add_argument('--no-flash', action='store_true', help='不做闪烁安全检查（WCAG 2.3.1）')
     ap.add_argument('--no-ocr', action='store_true', help='没有文字层时也不用 OCR 找字')
     ap.add_argument('--text-failed', help='（run.mjs 用）文字层渲染失败的原因')
@@ -1045,6 +1103,7 @@ def main():
               (f'目标 {a.lufs} ±1 LUFS' if a.lufs is not None else '没给 --lufs，响度只记录') + '；真峰值不能高于 −1.0 dBFS', L)
         y, sr = audio_mono(video)
         open_db = db(y[: int(0.5 * sr)])
+        mono_check(r, video, fps)
         r.add('audio.open', 'warn' if open_db < -50 else 'info', f'开头 0.5 秒的音量 {open_db:.1f} dBFS' + ('，几乎无声' if open_db < -50 else ''))
         names = [s for s in (a.loud.split(',') if a.loud else LOUD_DEFAULT) if s]
         checked, weak = 0, []
@@ -1137,6 +1196,10 @@ def main():
                 'openMotionRatio': round(float(diff[1:int(2 * fps)].mean()) / max(float(np.median(diff[1:])), 1e-3), 2) if n > 4 * fps else None,
                 'portrait': portrait, **open_feat}
     images['curve'] = str(out / 'curve.png')
+
+    # —— 和上一版比 ——
+    if a.compare:
+        compare_check(r, a.compare)
 
     # —— 写报告 ——
     if cfg:

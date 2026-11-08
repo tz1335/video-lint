@@ -33,6 +33,7 @@ def lint_video(
     sidecar: str | None = None,
     sfx_audio: str | None = None,
     out: str | None = None,
+    compare: str | None = None,
     ocr: bool = True,
     flash: bool = True,
 ) -> dict:
@@ -48,6 +49,7 @@ def lint_video(
         sidecar: path to a video-lint sidecar JSON (shots, hits, beats, sfx, captions).
         sfx_audio: path to a sound-effects-only stem, to measure effects against the music.
         out: report folder; defaults to <video>-lint/ next to the video.
+        compare: previous report.json (or its folder) to list fixed / new / remaining problems.
         ocr: find text with OCR when there is no text layer (needs the [ocr] extra).
         flash: run the flash safety check.
 
@@ -60,7 +62,7 @@ def lint_video(
         return {'error': f'找不到视频：{v}'}
     o = Path(out).expanduser().resolve() if out else v.with_name(v.stem + '-lint')
     cmd = [sys.executable, '-I', str(LINT), str(v), '--out', str(o)]
-    for flag, val in (('--platform', platform), ('--lufs', lufs), ('--captions', captions), ('--sidecar', sidecar), ('--sfx-audio', sfx_audio)):
+    for flag, val in (('--platform', platform), ('--lufs', lufs), ('--captions', captions), ('--sidecar', sidecar), ('--sfx-audio', sfx_audio), ('--compare', compare)):
         if val is not None:
             cmd += [flag, str(val)]
     if not ocr:

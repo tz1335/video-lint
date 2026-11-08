@@ -393,3 +393,61 @@ def test_mcp_tools(tmp_path):
     assert mcp_server.lint_video(str(tmp_path / 'nope.mp4')) == {'error': f'找不到视频：{(tmp_path / "nope.mp4").resolve()}'}
     plats = mcp_server.list_platforms()['platforms']
     assert {'douyin', 'tiktok', 'reels', 'shorts'} <= set(plats)
+
+
+# —— 手机外放（单声道）——
+
+def _stereo_video(tmp_path, name, left, right, sr=48000):
+    st = np.stack([left, right], axis=1)
+    with wave.open(str(tmp_path / f'{name}.wav'), 'wb') as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes((np.clip(st, -1, 1) * 32767).astype(np.int16).tobytes())
+    ffmpeg('-f', 'lavfi', '-i', f"color=c=gray:s=320x180:r={FPS}:d=3,format=gray,geq=lum='{MOVING}'", '-i', str(tmp_path / f'{name}.wav'),
+           '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'pcm_s16le', '-shortest', str(tmp_path / f'{name}.mov'))
+    return tmp_path / f'{name}.mov'
+
+
+@pytest.mark.parametrize('kind,expect', [('same', 'pass'), ('wide', 'pass'), ('antiphase', 'warn')])
+def test_mono_fold_down(tmp_path, kind, expect):
+    sr = 48000
+    t = np.arange(sr * 3) / sr
+    rng = np.random.default_rng(2)
+    a = 0.3 * np.sin(2 * math.pi * 220 * t)
+    if kind == 'same':
+        left, right = a, a
+    elif kind == 'wide':  # 左右互不相关：普通的宽立体声，混成单声道约小 3 dB
+        left, right = 0.2 * rng.standard_normal(len(t)), 0.2 * rng.standard_normal(len(t))
+    else:  # 一半时间左右反相
+        right = np.where(t < 1.5, a, -a)
+        left = a
+    v = _stereo_video(tmp_path, kind, left, right)
+    r = lint_report(v, tmp_path / 'out', '--no-ocr', '--no-flash')
+    assert r['by']['mono']['level'] == expect, r['by']['mono']['title']
+    if kind == 'antiphase':
+        assert r['by']['mono']['data']['segments']  # 反相的那半段被列出来
+
+
+# —— 和上一版比 ——
+
+def test_compare_lists_fixed_and_new(tmp_path):
+    old = make_video(tmp_path / 'v1.mp4', f'if(eq(N,0),0,{MOVING})', audio=TONE)  # 第 0 帧黑屏
+    lint_report(old, tmp_path / 'r1', '--no-ocr')
+    new = make_video(tmp_path / 'v2.mp4', MOVING, audio=TONE)  # 修好了
+    r = lint_report(new, tmp_path / 'r2', '--no-ocr', '--compare', str(tmp_path / 'r1'))
+    cmp_ = r['by']['compare']
+    assert 'open.frame0' in cmp_['data']['fixed']
+    assert cmp_['data']['added'] == []
+    assert cmp_['level'] == 'pass'
+    # 反过来比：第 0 帧黑屏是新出现的问题
+    r = lint_report(old, tmp_path / 'r3', '--no-ocr', '--compare', str(tmp_path / 'r2' / 'report.json'))
+    assert 'open.frame0' in r['by']['compare']['data']['added']
+    assert r['by']['compare']['level'] == 'warn'
+
+
+def test_compare_reports_pure():
+    old = [{'id': 'a', 'level': 'fail', 'title': 'A'}, {'id': 'b', 'level': 'warn', 'title': 'B'}, {'id': 'c', 'level': 'pass', 'title': 'C'}]
+    new = [{'id': 'a', 'level': 'pass', 'title': 'A'}, {'id': 'b', 'level': 'warn', 'title': 'B'}, {'id': 'c', 'level': 'fail', 'title': 'C'}]
+    fixed, added, still = lint.compare_reports(old, new)
+    assert [c['id'] for c in fixed] == ['a'] and [c['id'] for c in added] == ['c'] and [c['id'] for c in still] == ['b']

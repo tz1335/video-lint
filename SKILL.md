@@ -10,7 +10,7 @@ Checks a rendered video with fixed rules and writes a report you can act on. It 
 ## Run it
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.3.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.4.0"
 video-lint final.mp4 --out lint-report
 video-lint final.mp4 --sidecar sidecar.json --platform tiktok --lufs -14 --strict
 # 不安装：pip install -r requirements.txt && python -I lint.py final.mp4
@@ -67,6 +67,8 @@ A sidecar JSON unlocks the timing checks. Times are in **frames**, the beat grid
 - `.video-lint.toml` (next to the video or above) sets defaults — platform, lufs, loud, captions, ignore = [check ids, globs ok], [levels] overrides; flags win
 - `report.html` is written every run: one self-contained file to hand to a person
 - MCP: `video-lint-mcp` exposes `lint_video` and `list_platforms` (install the `[mcp]` extra)
+- `--compare <previous report.json or folder>` → a `compare` check: fixed / new / still there; new problems warn
+- Mono fold-down (phone speakers): whole video drops > 4.5 dB, or any 0.5 s window > 9 dB, when L+R are summed → warn (normal stereo ≈ −3 dB)
 - Flashing (WCAG 2.3.1): more than 3 flashes, or 3 red flashes, in any one second over ~11% of the frame → fail; `--no-flash` skips it
 - Frame 0: near-black → fail; under 0.5% of pixels brighter than 60/255 → fail
 - Text size on frame 0: line height ÷ video **width** (both orientations fill the phone width) — under 2.5% fail, under 4% warn

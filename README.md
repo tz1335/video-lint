@@ -13,7 +13,7 @@ It started inside a Remotion project that makes short explainer videos; every ru
 ## Install · 安装
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.3.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.4.0"
 video-lint final.mp4
 ```
 
@@ -64,6 +64,16 @@ ignore = ["static", "hit.*"]    # intentional — record only · 故意为之的
 "spec" = "info"                 # change one check's level · 改单项检查的级别
 ```
 
+## Before / after · 和上一版比
+
+```bash
+video-lint final_v2.mp4 --compare final_v1-lint/
+```
+
+Adds a `compare` check listing what was fixed, what is new and what is still there since the previous `report.json` (or its folder). New problems → ⚠.
+
+加一项 `compare` 检查，列出和上一版 `report.json`（或报告目录）相比修好了什么、新出现了什么、还剩什么；有新问题就 ⚠。
+
 ## Shareable HTML report · 可以直接发的 HTML 报告
 
 Every run also writes `report.html`: one self-contained file with the images embedded, checks filterable by level. Send it to whoever needs to look.
@@ -73,7 +83,7 @@ Every run also writes `report.html`: one self-contained file with the images emb
 ## GitHub Action
 
 ```yaml
-- uses: tz1335/video-lint@v0.3.0
+- uses: tz1335/video-lint@v0.4.0
   with:
     video: out/final.mp4
     args: --platform tiktok --lufs -14 --captions out/final.srt
@@ -87,7 +97,7 @@ Installs ffmpeg and video-lint, writes the report to the job summary, uploads th
 ## MCP server · 给 agent 用
 
 ```bash
-pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.3.0"
+pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.4.0"
 claude mcp add video-lint -- video-lint-mcp
 ```
 
@@ -118,6 +128,7 @@ The tests synthesise small videos with known answers using ffmpeg (a black first
 | Black / frozen · 黑场和静止 | black runs mid-video ⚠; frozen ≥ 1 s in the first 3 s ⚠<br>片中黑场 ⚠；前 3 秒有 1 秒以上不动 ⚠ |
 | Hits (with sidecar) · 爆点（需要旁注） | darken before, freeze N frames, burst after<br>爆点前收暗、最后 N 帧静止、爆点后亮起 |
 | Cut on beat · 硬切卡拍 | hard cuts more than ±1.5 frames off the grid ⚠ / ✗<br>硬切离拍点超过 ±1.5 帧 ⚠ / ✗ |
+| Phone speaker (mono) · 手机外放 | summed to mono, the whole video drops more than 4.5 dB, or any half second drops more than 9 dB ⚠ (ordinary stereo drops about 3 dB); reports the L/R correlation<br>左右声道混成单声道后整片小了 4.5 dB 以上，或某半秒小了 9 dB 以上 ⚠（普通立体声约小 3 dB）；同时记录左右声道相关系数。手机外放和很多蓝牙小音箱是单声道，反相的声音会被抵消 |
 | Loudness · 响度 | true peak > −1 dBFS ⚠, > 0 ✗; integrated LUFS only when `--lufs` is given<br>真峰值高于 −1 dBFS ⚠、高于 0 ✗；给了 `--lufs` 才判整片响度 |
 | Sound effects · 音效 | full-band or 1.2–5 kHz rise over the moment before; or, with a stem, effect-to-music ratio<br>比前一刻高出多少（全频或 1.2–5 kHz）；有音效分轨时改用音效和配乐的能量比 |
 | Text · 文字 | glyphs under a platform UI zone ✗ / ⚠; text touching the frame edge ⚠; text size recorded. Text boxes come from a text layer (`--text-dir`) or, without one, from OCR (`pip install rapidocr-onnxruntime`, any OS)<br>字被平台界面挡住 ✗ / ⚠；文字贴边 ⚠；字高只记录。文字框来自文字层（`--text-dir`），没有文字层时用 OCR 自动找（`pip install rapidocr-onnxruntime`，Windows / Mac / Linux 都能用） |
