@@ -10,7 +10,7 @@ Checks a rendered video with fixed rules and writes a report you can act on. It 
 ## Run it
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.5.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.6.0"
 video-lint final.mp4 --out lint-report
 video-lint final.mp4 --sidecar sidecar.json --platform tiktok --lufs -14 --strict
 # 不安装：pip install -r requirements.txt && python -I lint.py final.mp4
@@ -70,6 +70,9 @@ A sidecar JSON unlocks the timing checks. Times are in **frames**, the beat grid
 - `.video-lint.toml` (next to the video or above) sets defaults — platform, lufs, loud, captions, ignore = [check ids, globs ok], [levels] overrides; flags win
 - `report.html` is written every run: one self-contained file to hand to a person
 - MCP: `video-lint-mcp` exposes `lint_video` and `list_platforms` (install the `[mcp]` extra)
+- Every fail / warn has a `fix` hint; every run writes `fix.md` (to-do list: fails first, where + how). Loop: lint → edit per fix.md → re-render → lint again with `--compare <previous report>` (different `--out`) until no fail and nothing in `added`. MCP: `verify_fix(video, previous)` returns fixed / added / still / done
+- Loudness jump: ≥ 15 dB louder within 1 s (not out of silence, not within 0.4 s of a sidecar hit) → warn; dead air: ≥ 1 s below −50 dBFS mid-video → warn
+- Text contrast (WCAG 1.4.3): text ≥ 3% of frame height under 3:1 → warn; measured on the frame and 0.4 s earlier, clearer wins
 - `--compare <previous report.json or folder>` → a `compare` check: fixed / new / still there; new problems warn
 - Mono fold-down (phone speakers): whole video drops > 4.5 dB, or any 0.5 s window > 9 dB, when L+R are summed → warn (normal stereo ≈ −3 dB)
 - Flashing (WCAG 2.3.1): more than 3 flashes, or 3 red flashes, in any one second over ~11% of the frame → fail; `--no-flash` skips it

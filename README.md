@@ -13,7 +13,7 @@ It started inside a Remotion project that makes short explainer videos; every ru
 ## Install · 安装
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.5.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.6.0"
 video-lint final.mp4
 ```
 
@@ -64,6 +64,21 @@ ignore = ["static", "hit.*"]    # intentional — record only · 故意为之的
 "spec" = "info"                 # change one check's level · 改单项检查的级别
 ```
 
+## Fix loop · 闭环修复
+
+Every ✗ / ⚠ comes with a `fix` hint, and every run writes `fix.md`: the to-do list, failures first, each with where to edit and how. Fix, re-render, then check against the previous report:
+
+每个 ✗ / ⚠ 都带一条 `fix`（改法），每次运行还会写一份 `fix.md`：要改的清单，✗ 在前，每项写明改哪里、怎么改。改完重新导出，再和上一版比：
+
+```bash
+video-lint final.mp4 --out r1/            # read r1/fix.md and edit · 照 r1/fix.md 改
+video-lint final.mp4 --out r2/ --compare r1/
+```
+
+Done when there is no ✗ and nothing new under `compare`. With the MCP server an agent runs the loop itself: `lint_video` → edit the files in `where` following `fix` → re-render → `verify_fix(video, previous=...)` until `done` is true.
+
+没有 ✗、`compare` 里也没有「新出现」，这一轮就算改完了。接上 MCP 之后 agent 可以自己跑这个循环：`lint_video` → 按 `fix` 改 `where` 指的文件 → 重新渲染 → `verify_fix(video, previous=...)`，直到 `done` 为真。
+
 ## Errors that point at your source · 报错直接指到源码
 
 If the sidecar says where each shot is drawn, every ✗ / ⚠ comes with a `file:line`, the way ESLint does:
@@ -100,7 +115,7 @@ Every run also writes `report.html`: one self-contained file with the images emb
 ## GitHub Action
 
 ```yaml
-- uses: tz1335/video-lint@v0.5.0
+- uses: tz1335/video-lint@v0.6.0
   with:
     video: out/final.mp4
     args: --platform tiktok --lufs -14 --captions out/final.srt
@@ -114,13 +129,13 @@ Installs ffmpeg and video-lint, writes the report to the job summary, uploads th
 ## MCP server · 给 agent 用
 
 ```bash
-pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.5.0"
+pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.6.0"
 claude mcp add video-lint -- video-lint-mcp
 ```
 
-Tools: `lint_video(video, platform, lufs, captions, sidecar, sfx_audio, out, ocr, flash)` returns the status, every ✗ / ⚠ / ? check and the report paths; `list_platforms()` lists platforms with their zone and spec data. Works with Claude Code, Cursor and any other MCP client.
+Tools: `lint_video(video, platform, lufs, captions, sidecar, sfx_audio, out, compare, ocr, flash)` returns the status, every ✗ / ⚠ / ? check with its `where` and `fix`, and the report paths (including `fix.md`); `verify_fix(video, previous, ...)` re-checks a new render against the previous report and returns `fixed` / `added` / `still` and `done`; `list_platforms()` lists platforms with their zone and spec data. Works with Claude Code, Cursor and any other MCP client.
 
-工具：`lint_video` 返回整体状态、所有 ✗ / ⚠ / ? 的检查和报告路径；`list_platforms` 列出支持的平台和它们的遮挡区、规格数据。Claude Code、Cursor 和其它支持 MCP 的客户端都能用。
+工具：`lint_video` 返回整体状态、所有 ✗ / ⚠ / ? 的检查（带位置 `where` 和改法 `fix`）和报告路径（包括 `fix.md`）；`verify_fix` 改完后重新检查并和上一版比，返回修好、新出现、还在的问题和 `done`；`list_platforms` 列出支持的平台和它们的遮挡区、规格数据。Claude Code、Cursor 和其它支持 MCP 的客户端都能用。
 
 ## Tests · 测试
 
@@ -139,15 +154,18 @@ The tests synthesise small videos with known answers using ffmpeg (a black first
 |---|---|
 | Frame 0 · 第 0 帧 | near-black ✗; under 0.5% bright pixels ✗; clearly darker than 0.5–2 s (fade-in) ⚠<br>近乎全黑 ✗；亮像素不到 0.5% ✗；明显比 0.5–2 秒暗（淡入开场）⚠ |
 | First 2 seconds · 前 2 秒 | black frames ⚠; motion relative to the rest of the video (recorded)<br>有黑帧 ⚠；运动量和全片相比的倍数（只记录） |
-| Flashing (WCAG 2.3.1) · 闪烁安全 | more than 3 general or red flashes in any second over a large area ✗ (area ≈ 11% of the frame, summed over the whole frame, slightly stricter than the standard)<br>任意 1 秒内大面积闪烁或红色闪烁超过 3 次 ✗（面积约占画面 11%，按整帧累加，比标准略严）。可能诱发光敏性癫痫 |
+| Flashing (WCAG 2.3.1) · 闪烁安全 | more than 3 general or red flashes in any second over a large area ✗ (area ≈ 11% of the frame, summed over the whole frame, slightly stricter than the standard); reversing patterns (checkerboards, stripes) are caught by the same check as long as each cell is wider than about 1% of the frame<br>任意 1 秒内大面积闪烁或红色闪烁超过 3 次 ✗（面积约占画面 11%，按整帧累加，比标准略严）。可能诱发光敏性癫痫。棋盘格、条纹这类反转图案也由这一项抓，格子宽度大于画面约 1% 就行 |
 | Upload spec · 上传规格 | codec, pixel format, frame rate, resolution, aspect for the `--platform`, duration limit, audio codec and sample rate ⚠ (low bitrate is only a hint); recommended values in `video_lint/specs.json`<br>编码、像素格式、帧率、分辨率、对应 `--platform` 的画幅、时长上限、音频编码和采样率 ⚠（码率偏低只提示）；推荐值在 `video_lint/specs.json` |
 | Caption reading speed · 字幕阅读速度 | more than 9 CJK characters or 20 Latin characters per second, or on screen for under 5/6 s ⚠ (Netflix timed-text guidelines); captions from the sidecar or `--captions file.srt / .vtt / .ass`<br>中文每秒超过 9 个字、英文每秒超过 20 个字符，或停留不到 5/6 秒 ⚠（Netflix 字幕规范）；字幕来自旁注，或 `--captions` 直接读 SRT / VTT / ASS |
 | Black / frozen · 黑场和静止 | black runs mid-video ⚠; frozen ≥ 1 s in the first 3 s ⚠<br>片中黑场 ⚠；前 3 秒有 1 秒以上不动 ⚠ |
 | Hits (with sidecar) · 爆点（需要旁注） | darken before, freeze N frames, burst after<br>爆点前收暗、最后 N 帧静止、爆点后亮起 |
 | Cut on beat · 硬切卡拍 | hard cuts more than ±1.5 frames off the grid ⚠ / ✗<br>硬切离拍点超过 ±1.5 帧 ⚠ / ✗ |
 | Phone speaker (mono) · 手机外放 | summed to mono, the whole video drops more than 4.5 dB, or any half second drops more than 9 dB ⚠ (ordinary stereo drops about 3 dB); reports the L/R correlation<br>左右声道混成单声道后整片小了 4.5 dB 以上，或某半秒小了 9 dB 以上 ⚠（普通立体声约小 3 dB）；同时记录左右声道相关系数。手机外放和很多蓝牙小音箱是单声道，反相的声音会被抵消 |
+| Loudness jumps · 响度突增 | 15 dB or more louder within a second ⚠ (EBU R128 loudness jump, unweighted approximation); rises out of silence and on sidecar hits don't count<br>1 秒内突然响 15 dB 以上 ⚠（EBU R128 的响度跳变，用没加权的电平近似）；从静音起来的、落在旁注爆点上的不算 |
+| Dead air · 静音空档 | 1 s or more below −50 dBFS mid-video ⚠ (the first 0.3 s and last 1 s don't count)<br>片中 1 秒以上低于 −50 dBFS ⚠（开头 0.3 秒、最后 1 秒不算） |
 | Loudness · 响度 | true peak > −1 dBFS ⚠, > 0 ✗; integrated LUFS only when `--lufs` is given<br>真峰值高于 −1 dBFS ⚠、高于 0 ✗；给了 `--lufs` 才判整片响度 |
 | Sound effects · 音效 | full-band or 1.2–5 kHz rise over the moment before; or, with a stem, effect-to-music ratio<br>比前一刻高出多少（全频或 1.2–5 kHz）；有音效分轨时改用音效和配乐的能量比 |
+| Text contrast (WCAG 1.4.3) · 文字对比度 | large text under 3:1 against what is behind it ⚠; 3:1–4.5:1 noted; text under 3% of the frame height is counted, not judged. Each text box is measured on the sampled frame and 0.4 s earlier (the clearer one wins), so text fading out at a cut is not flagged<br>大字和背景的对比度低于 3:1 ⚠，3:1–4.5:1 记录；字高不到画面 3% 的小字只数不判。每个文字框在抽样帧和 0.4 秒前各量一次，取清楚的那次，镜头切走前正在淡出的字不会误报 |
 | Text · 文字 | glyphs under a platform UI zone ✗ / ⚠; text touching the frame edge ⚠; text size recorded. Text boxes come from a text layer (`--text-dir`) or, without one, from OCR (`pip install rapidocr-onnxruntime`, any OS)<br>字被平台界面挡住 ✗ / ⚠；文字贴边 ⚠；字高只记录。文字框来自文字层（`--text-dir`），没有文字层时用 OCR 自动找（`pip install rapidocr-onnxruntime`，Windows / Mac / Linux 都能用） |
 | Opening rules · 开头规则 | frame 0 has text big enough to read; a hook in the top half (portrait); a number within 8 s<br>第 0 帧有够大的字；竖屏上半屏有钩子；8 秒内出现数字 |
 

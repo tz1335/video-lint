@@ -483,3 +483,91 @@ def test_where_falls_back_to_composition():
     c2 = [{'id': 'black', 'level': 'warn', 'title': '', 'detail': '', 'data': [[70, 80]]}]
     lint.locate_checks(c2, {'shots': [{'name': 'body', 'from': 60, 'to': 120}]}, fps)  # 旁注没有源码位置：不加 where
     assert 'where' not in c2[0]
+
+
+# —— 标配：响度突增、静音空档、文字对比度、反转图案 ——
+
+def _tone_video(tmp_path, name, amp):
+    """3 秒 440 Hz，amp(t) 是每个采样的振幅"""
+    sr = 48000
+    t = np.arange(sr * 3) / sr
+    y = amp(t) * np.sin(2 * math.pi * 440 * t)
+    return _stereo_video(tmp_path, name, y, y)
+
+
+def test_audio_jump(tmp_path):
+    v = _tone_video(tmp_path, 'jump', lambda t: np.where(t < 1.5, 0.02, 0.6))  # 1.5 秒处 +30 dB
+    r = lint_report(v, tmp_path / 'out', '--no-ocr', '--no-flash')
+    assert r['by']['audio.jump']['level'] == 'warn'
+    assert abs(r['by']['audio.jump']['data'][0]['from'] / FPS - 1.5) < 0.4
+    # 同一处标成爆点：故意的，不算
+    sc = {'fps': FPS, 'durationFrames': 90, 'shots': [], 'hits': [{'name': 'hit1', 'frame': 45, 'darkFrom': None, 'freeze': None}], 'sfx': [], 'captions': []}
+    r = lint_report(v, tmp_path / 'out2', '--no-ocr', '--no-flash', sidecar=sc)
+    assert r['by']['audio.jump']['level'] == 'pass'
+
+
+def test_audio_silence_gap(tmp_path):
+    v = _tone_video(tmp_path, 'gap', lambda t: np.where((t > 0.5) & (t < 1.8), 0.0, 0.3))
+    r = lint_report(v, tmp_path / 'out', '--no-ocr', '--no-flash')
+    assert r['by']['audio.silence']['level'] == 'warn', r['by']['audio.silence']['title']
+    a, b = r['by']['audio.silence']['data'][0]
+    assert 0.3 * FPS <= a <= 0.7 * FPS and 1.7 * FPS <= b <= 2.3 * FPS
+    v = _tone_video(tmp_path, 'nogap', lambda t: 0.3 + 0 * t)
+    assert lint_report(v, tmp_path / 'out2', '--no-ocr', '--no-flash')['by']['audio.silence']['level'] == 'pass'
+
+
+def test_text_contrast_measure():
+    bg = np.zeros((40, 200, 3), np.float32)
+    white = bg.copy()
+    white[15:25, 20:180:6] = 255  # 白字黑底
+    assert lint.text_contrast(white) > 15
+    dim = bg + 90
+    dim[15:25, 20:180:6] = 115  # 灰字灰底
+    assert lint.text_contrast(dim) < 2
+    assert lint.text_contrast(bg + 50) is None  # 一片均匀：不判
+
+
+@pytest.mark.parametrize('fg,expect', [(235, 'pass'), (62, 'warn')])
+def test_text_contrast_check(tmp_path, fg, expect):
+    # 画面中间一条「字」：竖条纹，前景 fg、背景 40
+    lum = f"if(between(Y\\,60\\,100)*between(X\\,40\\,280)*lt(mod(X\\,8)\\,3)\\,{fg}\\,40)"
+    v = make_video(tmp_path / 'c.mp4', lum, seconds=2)
+    r = lint.Report()
+    lint.contrast_check(r, v, {30: [(40 / 320, 60 / 180, 280 / 320, 100 / 180)]}, FPS, tmp_path, False)
+    assert r.checks[0]['id'] == 'text.contrast' and r.checks[0]['level'] == expect, r.checks[0]['title']
+
+
+def test_reversing_checkerboard_is_a_flash(tmp_path):
+    # 棋盘格每 3 帧黑白互换一次（一秒 10 次）：WCAG 2.3.1 的「反转图案」，由闪烁检查抓到
+    lum = "if(eq(mod(floor(X/40)+floor(Y/40)+floor(N/3)\\,2)\\,0)\\,230\\,20)"
+    v = make_video(tmp_path / 'checker.mp4', lum, seconds=2)
+    r = lint_report(v, tmp_path / 'out', '--no-ocr')
+    assert r['by']['flash']['level'] == 'fail'
+
+
+# —— 闭环：改法、fix.md、verify_fix ——
+
+def test_fix_hints_and_fix_md(tmp_path):
+    v = make_video(tmp_path / 'v.mp4', f'if(eq(N,0),0,{MOVING})', audio=TONE)
+    r = lint_report(v, tmp_path / 'out', '--no-ocr')
+    assert '淡入' in r['by']['open.frame0']['fix']
+    assert 'fix' not in r['by']['meta']
+    md = (tmp_path / 'out' / 'fix.md').read_text(encoding='utf-8')
+    assert 'open.frame0' in md and '--compare' in md
+    assert r['images']['fix'].endswith('fix.md')
+
+
+def test_mcp_verify_fix(tmp_path):
+    try:
+        from video_lint import mcp_server
+    except ImportError:
+        import mcp_server
+    old = make_video(tmp_path / 'v1.mp4', f'if(eq(N,0),0,{MOVING})', seconds=2, audio=TONE)
+    first = mcp_server.lint_video(str(old), ocr=False)
+    assert any(p['id'] == 'open.frame0' and p.get('fix') for p in first['problems'])
+    assert first['fix_md'].endswith('fix.md')
+    new = make_video(tmp_path / 'v2.mp4', MOVING, seconds=2, audio=TONE)
+    res = mcp_server.verify_fix(str(new), first['report_json'], ocr=False)
+    assert 'open.frame0' in res['fixed'] and res['added'] == [] and res['done'] is True
+    # 输出目录和上一版一样会覆盖掉上一版：拒绝
+    assert 'error' in mcp_server.verify_fix(str(new), first['report_json'], out=str(Path(first['report_json']).parent), ocr=False)

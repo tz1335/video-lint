@@ -4,7 +4,8 @@
   claude mcp add video-lint -- video-lint-mcp
 
 工具：
-  lint_video      质检一个视频，返回整体状态、要处理的问题（✗ ⚠ ?）和报告路径（report.md / report.html / report.json）
+  lint_video      质检一个视频，返回整体状态、要处理的问题（✗ ⚠ ?，带位置和改法）和报告路径（report.md / report.html / report.json / fix.md）
+  verify_fix      改完之后再查一遍并和上一版的报告比：修好了、新出现、还在的问题，done = 没有新问题也没有 ✗
   list_platforms  能用的 --platform 和它们的遮挡区、规格数据
 它在子进程里跑同目录的 lint.py，所以和命令行的结论完全一样。
 """
@@ -54,7 +55,8 @@ def lint_video(
         flash: run the flash safety check.
 
     Returns status (pass / fail / unmeasured), a one-line headline, every fail / warn / skip check with its
-    detail (plus `where`: source file:line, shot and frame range when the sidecar carries source locations), and the paths of report.md, report.html (self-contained, shareable) and report.json.
+    detail, a `fix` hint and (when the sidecar carries source locations) `where`: source file:line, shot and frame range;
+    plus the paths of report.md, fix.md (the to-do list),, report.html (self-contained, shareable) and report.json.
     Fix fail items first; warn items need a judgement; unmeasured means something could not be checked.
     """
     v = Path(video).expanduser().resolve()
@@ -78,12 +80,60 @@ def lint_video(
     return {
         'status': rep['status'],
         'headline': f'{s["fail"]} fail, {s["warn"]} warn, {s["pass"]} pass, {s["skip"]} unmeasured',
-        'problems': [{k: c[k] for k in ('id', 'level', 'title', 'detail', 'where') if k in c} for c in rep['checks'] if c['level'] in ('fail', 'warn', 'skip')],
+        'problems': [{k: c[k] for k in ('id', 'level', 'title', 'detail', 'where', 'fix') if k in c} for c in rep['checks'] if c['level'] in ('fail', 'warn', 'skip')],
         'report_md': str(o / 'report.md'),
         'report_html': rep['images'].get('html'),
         'report_json': str(report),
+        'fix_md': rep['images'].get('fix'),
         'version': rep['version'],
     }
+
+
+
+@mcp.tool()
+def verify_fix(
+    video: str,
+    previous: str,
+    platform: str | None = None,
+    lufs: float | None = None,
+    captions: str | None = None,
+    sidecar: str | None = None,
+    sfx_audio: str | None = None,
+    out: str | None = None,
+    ocr: bool = True,
+    flash: bool = True,
+) -> dict:
+    """After fixing problems from an earlier lint_video run, check the new render and compare it with the previous report.
+
+    Args:
+        video: absolute path to the new render.
+        previous: report.json (or its folder) from the run you were fixing. Use a different `out` than that run,
+            or the previous report is overwritten (default out is <video>-lint/ next to the new video).
+        Other args: same as lint_video; pass the same ones as the previous run so the comparison is fair.
+
+    Returns fixed / added / still (check ids), done (no new problems and no fail left), and the same fields as lint_video.
+    Loop: lint_video → edit the files in `where` following `fix` → re-render → verify_fix(previous=...) until done.
+    """
+    prev = Path(previous).expanduser().resolve()
+    prev = prev / 'report.json' if prev.is_dir() else prev
+    if not prev.is_file():
+        return {'error': f'找不到上一版的报告：{prev}'}
+    o = Path(out).expanduser().resolve() if out else None
+    if o and (o / 'report.json').resolve() == prev:
+        return {'error': 'out 和上一版报告是同一个目录，会覆盖掉上一版；换一个 out'}
+    res = lint_video(video, platform, lufs, captions, sidecar, sfx_audio, out, str(prev), ocr, flash)
+    if 'error' in res:
+        return res
+    rep = json.loads(Path(res['report_json']).read_text(encoding='utf-8'))
+    cmp_ = next((c for c in rep['checks'] if c['id'] == 'compare'), None)
+    data = (cmp_ or {}).get('data') or {}
+    res.update({
+        'fixed': data.get('fixed', []),
+        'added': data.get('added', []),
+        'still': data.get('still', []),
+        'done': not data.get('added') and rep['summary']['fail'] == 0,
+    })
+    return res
 
 
 @mcp.tool()

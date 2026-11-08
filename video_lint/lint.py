@@ -30,7 +30,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = '0.5.0'
+VERSION = '0.6.0'
 # 「要听得见」的音效：冲击、动作音；whoosh、swish、paper、room 这类本来就轻，不查
 LOUD_DEFAULT = ['impact', 'press', 'drop', 'chime', 'bell', 'clink', 'stamp', 'coin', 'tick', 'gunshot', 'crack', 'chapter', 'footstep', 'bloom']
 ZONES_FILE = Path(__file__).with_name('zones.json')
@@ -821,6 +821,181 @@ def compare_check(r, path):
           {'fixed': [c['id'] for c in fixed], 'added': [c['id'] for c in added], 'still': [c['id'] for c in still], 'previous': str(p_)})
 
 
+# —— 响度突增、静音空档 ——
+def _momentary(y, sr, win=0.4, hop=0.1):
+    """每 0.1 秒一个点的 0.4 秒窗口电平（dBFS，没做 K 加权，是 EBU 瞬时响度的近似）"""
+    w, h = int(win * sr), int(hop * sr)
+    if len(y) < w:
+        return np.array([])
+    y2 = y.astype(np.float64) ** 2
+    c = np.concatenate([[0.0], np.cumsum(y2)])
+    starts = np.arange(0, len(y) - w + 1, h)
+    return 10 * np.log10((c[starts + w] - c[starts]) / w + 1e-12)
+
+
+def audio_jump_check(r, y, sr, fps, hits=()):
+    """1 秒内突然响了 15 dB 以上（EBU R128 的「响度跳变」，video-safety-check 用的同一阈值）。
+    从静音起来的不算（前 1 秒中位数要高于 −45 dBFS），落在旁注爆点 ±0.2 秒内的也不算：那是故意的。"""
+    M = _momentary(y, sr)
+    if len(M) < 20:
+        return
+    ev = []
+    for i in range(10, len(M)):
+        base = float(np.median(M[i - 10:i]))
+        if base > -45 and M[i] - base >= 15:
+            t = i * 0.1 + 0.2  # 窗口中心
+            if ev and t - ev[-1][1] <= 1.0:
+                ev[-1] = (ev[-1][0], t, max(ev[-1][2], float(M[i] - base)))
+            else:
+                ev.append((t, t, float(M[i] - base)))
+    # 起点落在爆点前后 0.4 秒内的是故意的（窗口 0.4 秒长，第一次超标时离真正的起音最多差这么多）
+    ev = [e for e in ev if not any(abs(h / fps - e[0]) <= 0.4 for h in hits)]
+    lv = 'warn' if ev else 'pass'
+    rows = '\n'.join(f'  - {a:.1f} 秒：比前 1 秒高了 {d:.0f} dB' for a, b, d in ev[:15])
+    r.add('audio.jump', lv, f'响度突增：{len(ev)} 处 1 秒内响了 15 dB 以上' if ev else '没有突然变响的地方',
+          '标准：1 秒内不突然响 15 dB 以上（EBU R128 的响度跳变；这里用没加权的电平近似）。刷视频的人多半开着外放，突然炸响会被划走。从静音起来的、落在爆点上的不算。'
+          + ('\n' + rows if rows else ''), [{'from': int(a * fps), 'to': int(b * fps) + int(0.4 * fps), 'jumpDb': round(d, 1)} for a, b, d in ev])
+
+
+def audio_silence_check(r, y, sr, fps):
+    """片中 1 秒以上几乎没声音（低于 −50 dBFS）。开头 0.3 秒和最后 1 秒不算，开头那段由 audio.open 管。"""
+    M = _momentary(y, sr)
+    if not len(M):
+        return
+    dur = len(y) / sr
+    quiet = runs(M < -50, 1)
+    gaps = []
+    for s_, e_ in quiet:
+        a, b = s_ * 0.1, e_ * 0.1 + 0.4
+        if b - a >= 1.0 and a >= 0.3 and b <= dur - 1.0:
+            gaps.append((a, b))
+    r.add('audio.silence', 'warn' if gaps else 'pass', f'片中有 {len(gaps)} 段 1 秒以上没声音' if gaps else '片中没有 1 秒以上的静音空档',
+          '片中突然没声音，常是音频没接上、配乐提前结束或段落之间漏了衔接；故意的留白可以在配置里 ignore = ["audio.silence"]。'
+          + ('\n' + '\n'.join(f'  - {a:.1f}–{b:.1f} 秒（{b - a:.1f} 秒）' for a, b in gaps[:15]) if gaps else ''),
+          [[int(a * fps), int(b * fps)] for a, b in gaps])
+
+
+# —— 文字对比度（WCAG 1.4.3）——
+def _otsu(v):
+    hist, edges = np.histogram(v, bins=64)
+    w = np.cumsum(hist)
+    m = np.cumsum(hist * (edges[:-1] + edges[1:]) / 2)
+    total, mt = w[-1], m[-1]
+    w1 = total - w
+    ok = (w > 0) & (w1 > 0)
+    between = np.where(ok, (mt * w / np.maximum(total, 1) - m) ** 2 / np.maximum(w * w1, 1), 0)
+    return edges[int(np.argmax(between)) + 1]
+
+
+def text_contrast(rgb):
+    """一块文字框里文字和背景的对比度：亮度（线性）分成两类，笔画少的一类当文字，两类中位数按 WCAG 公式算"""
+    L = (0.2126 * _linear(rgb[..., 0]) + 0.7152 * _linear(rgb[..., 1]) + 0.0722 * _linear(rgb[..., 2])).ravel()
+    if L.size < 40 or L.max() - L.min() < 0.02:
+        return None  # 一片均匀：字还没淡入、或者框里其实没字
+    t = _otsu(L)
+    lo, hi = L[L <= t], L[L > t]
+    if not len(lo) or not len(hi):
+        return None
+    # 笔画少的一类是文字；文字取靠外的 10% 分位（抗锯齿的边会把中位数拉向背景），背景取中位数
+    if len(hi) <= len(lo):
+        a, b = float(np.median(lo)), float(np.percentile(hi, 90))
+    else:
+        a, b = float(np.percentile(lo, 10)), float(np.median(hi))
+    return (b + 0.05) / (a + 0.05)
+
+
+def contrast_check(r, video, boxes, fps, out, from_ocr):
+    """WCAG 1.4.3：大字（短视频里的字基本都是）对比度至少 3:1，正文 4.5:1。这里按 3:1 判 ⚠，4.5:1 以下只记录。"""
+    frames = sorted(f for f in boxes if boxes[f])
+    if not frames:
+        return
+    P = probe(video)
+    tw = min(P['width'], 960)
+    # 联系表的帧多在镜头切走前 4 帧，字常常正在淡出 / 虚化：同一个框再看 0.4 秒前那一帧，取清楚的那次
+    back = int(0.4 * fps)
+    ims = extract_frames(video, sorted(set(frames) | {f - back for f in frames if f >= back}), tw, out)
+    rows, small = [], 0
+    for f in frames:
+        if f not in ims:
+            continue
+        pics = [np.asarray(ims[g].convert('RGB'), np.float32) for g in (f, f - back) if g in ims]
+        im = pics[0]
+        H_, W_ = im.shape[:2]
+        for b in boxes[f]:
+            x0, y0, x1, y1 = b
+            if (y1 - y0) * H_ < 8:
+                continue
+            if y1 - y0 < 0.03:  # 小字（脚注、出处、示意标签）常常故意压暗，只数不判
+                small += 1
+                continue
+            pad = 0.15 * (y1 - y0)
+            cut = lambda m: m[max(0, int((y0 - pad) * H_)):int((y1 + pad) * H_) + 1, max(0, int((x0 - pad * H_ / W_) * W_)):int((x1 + pad * H_ / W_) * W_) + 1]
+            cs = [c for c in (text_contrast(cut(m)) for m in pics) if c is not None]
+            c = max(cs) if cs else None
+            if c is not None:
+                rows.append((c, f, tuple(float(v) for v in b)))
+    if not rows:
+        return
+    low = sorted([x for x in rows if x[0] < 3.0])
+    mid = [x for x in rows if 3.0 <= x[0] < 4.5]
+    worst = min(rows)[0]
+    lv = 'warn' if low else 'pass'
+    r.add('text.contrast', lv, f'文字对比度：{len(rows)} 行字里 {len(low)} 行低于 3:1' if low else f'文字对比度都在 3:1 以上（最低 {worst:.1f}:1）',
+          '标准 WCAG 1.4.3：大字至少 3:1、小字 4.5:1。按文字框里亮暗两类的中位数算，发光、描边、渐变背景会让数字偏高或偏低，要人看一眼。'
+          + (f'{len(mid)} 行在 3:1–4.5:1 之间（大字可以，小字不够）。' if mid else '') + (f'字高不到画面 3% 的 {small} 行小字没判。' if small else '') + ('文字框来自 OCR：对比度太低的字本身就可能没被认出来。' if from_ocr else '')
+          + ('\n' + '\n'.join(f'  - 第 {f} 帧（{f / fps:.2f} 秒）{c:.1f}:1，框 {tuple(round(v, 2) for v in b)}' for c, f, b in low[:15]) if low else ''),
+          [{'frame': f, 'ratio': round(c, 2), 'box': list(b)} for c, f, b in low])
+
+
+# —— 修复建议：每类问题怎么改（写进 report.json 的 fix、fix.md 和 MCP 结果）——
+FIX_HINTS = {
+    'open.frame0': '第 0 帧就给完整画面：去掉淡入，或者把封面那一帧放到第 0 帧；改完看 frame0.jpg',
+    'open.black': '前 2 秒不要黑帧：检查转场是不是先黑再亮，换成叠化或直接硬切',
+    'open.rule1': '主体在第 0 帧就画好，「长出来」的动画留给背景和细节',
+    'open.rule2': '第 0 帧就要有够大的字：字高至少视频宽的 4%（6% 以上更稳），第一句不超过 10 个字，别逐字打出来',
+    'open.rule4': '竖屏上半屏从第 0 帧起挂一句第二人称的问题，放在顶栏 8% 以下，挂到标题出来',
+    'open.rule5': '8 秒内的字幕里给一个带人数或年份的数字',
+    'black': '片中黑场：多半是两个镜头之间没接上（前一个结束早了、后一个开始晚了），把时间表里的起止帧接上',
+    'static': '画面停住 1 秒以上：加一点慢推、粒子或者让下一个元素提前进场',
+    'flash': '闪烁太快：把闪白 / 硬切拉开到 1 秒 3 次以内，或者缩小闪的面积、降低亮度差',
+    'hit.': '爆点：重拍前约 0.7 秒开始收暗，最后 3 帧静止，重拍那一帧亮起；改时间表里爆点前后的帧',
+    'beats.cuts': '硬切不在拍上：把镜头起止帧对到 beats 网格（±1.5 帧以内），时间在 defined 指的那一行',
+    'text.zones': '字被平台界面盖住：把这几行字挪进安全区（竖屏避开底部文案区和右侧按钮列），或者缩小',
+    'text.edge': '字贴边：留出至少 4% 的边距',
+    'text.contrast': '文字对比度低：加深背景（暗角、底板、半透明黑条）或者提亮文字，至少 3:1',
+    'captions.speed': '字幕太快：拆成两条、删字，或者让这一条多停留一会儿（中文每秒不超过 9 个字，至少 5/6 秒）',
+    'audio.loudness': '响度：整片拉到目标 LUFS，真峰值限在 −1 dBFS 以下（导出时过一道限幅）',
+    'audio.jump': '突然变响：把这一处的音效 / 配乐音量压下来，或者前面做个渐强',
+    'audio.silence': '片中静音：检查配乐是不是提前结束、段落之间漏了衔接；故意留白就在配置里忽略',
+    'audio.open': '开头没声音：第 0 帧就进配乐或音效',
+    'audio.sfx': '音效听不见：加音量，或者让开配乐的频段（同一时刻压一下配乐），或者挪开前一个音效',
+    'mono': '外放会抵消：检查加宽效果、反相的音效或立体声混响，换成单声道兼容的版本',
+    'spec': '上传规格：按 video_lint/specs.json 里推荐的编码、帧率、分辨率重新导出',
+    'compare': '有新问题：这一版改动把别的东西改坏了，先看「新出现」那几项',
+}
+
+
+def fix_hint(cid):
+    return FIX_HINTS.get(cid) or next((v for k, v in FIX_HINTS.items() if k.endswith(('.', 'rule')) and cid.startswith(k)), None) or FIX_HINTS.get(cid.split('.')[0])
+
+
+def write_fix(out, checks, video, fps):
+    """fix.md：只列 ✗ ⚠，✗ 在前；每项给位置和改法，最后给验证命令。给人看，也给 agent 照着改"""
+    todo = [c for c in checks if c['level'] in ('fail', 'warn') and c['id'] not in ('compare',)]
+    todo.sort(key=lambda c: c['level'] != 'fail')
+    md = [f'# 要改的 {len(todo)} 项', '', f'成片：{video}', '']
+    for i, c in enumerate(todo, 1):
+        md.append(f'{i}. {ICON[c["level"]]} **{c["title"]}**（`{c["id"]}`）')
+        for w in c.get('where', []):
+            md.append(f'   - 位置：`{where_text(w, fps)}`')
+        if c.get('fix'):
+            md.append(f'   - 改法：{c["fix"]}')
+    md += ['', '改完重新导出（或渲小样），再跑一遍并和这一版比：', '', '```bash', f'video-lint <新成片> --compare {out / "report.json"}', '```',
+           '', '`compare` 那一项列出修好了、新出现、还在的问题；没有「新出现」、也没有 ✗ 就算这一轮改完了。']
+    (out / 'fix.md').write_text('\n'.join(md), encoding='utf-8')
+    return out / 'fix.md'
+
+
 # —— 报错定位到源码 ——
 # 旁注里的镜头、爆点、音效、字幕可以带 source: {file, line}（相对旁注的 root），sources.composition 是整片的入口组件。
 # 每个 ✗ / ⚠ 检查先换算出「出事的帧段」，再落到镜头，最后给出 file:line，像 ESLint 指到行号那样。
@@ -859,6 +1034,12 @@ def _check_ranges(c, sc, fps):
             return [(x['frame'], x['frame'] + int(0.3 * fps), by_frame(sc.get('sfx', []), x['frame'])) for x in ev]
         if cid == 'captions.speed':
             return [(a, b, by_frame(sc.get('captions', []), a)) for a, b in d['at']]
+        if cid == 'audio.jump':
+            return [(x['from'], x['to'], None) for x in d]
+        if cid == 'audio.silence':
+            return [(a, b, None) for a, b in d]
+        if cid == 'text.contrast':
+            return [(x['frame'], x['frame'], None) for x in d]
         if cid == 'mono':
             return [(int(t * fps), int((t + 0.5) * fps), None) for t, _ in d['segments']]
     except (KeyError, TypeError, IndexError, StopIteration):
@@ -1198,6 +1379,8 @@ def main():
         y, sr = audio_mono(video)
         open_db = db(y[: int(0.5 * sr)])
         mono_check(r, video, fps)
+        audio_jump_check(r, y, sr, fps, [h['frame'] for h in sc.get('hits', [])])
+        audio_silence_check(r, y, sr, fps)
         r.add('audio.open', 'warn' if open_db < -50 else 'info', f'开头 0.5 秒的音量 {open_db:.1f} dBFS' + ('，几乎无声' if open_db < -50 else ''))
         names = [s for s in (a.loud.split(',') if a.loud else LOUD_DEFAULT) if s]
         checked, weak = 0, []
@@ -1247,7 +1430,7 @@ def main():
             f, _, name = item.strip().partition('=')
             extra.append((min(n - 1, max(0, int(f))), name))
     want = [f for f, _ in picks] + [f for _, _, fs in hit_tiles for f in fs if 0 <= f < n] + [f for f, _ in extra]
-    boxes, boxes_from_ocr = {}, False
+    boxes, boxes_from_ocr, no_text_source = {}, False, False
     if a.text_dir and (Path(a.text_dir) / 'frames.json').exists():
         boxes = text_boxes(a.text_dir, video, out)
         text_checks(r, boxes, zones, sc, fps, P['width'] / P['height'])
@@ -1259,6 +1442,10 @@ def main():
         boxes, boxes_from_ocr = ocr_boxes(engine, video, frames, out), True
         text_checks(r, boxes, zones, sc, fps, P['width'] / P['height'], source='画面 OCR（RapidOCR，小字、艺术字、低对比的字可能漏掉，图形偶尔被当成字）')
     else:
+        no_text_source = True
+    if boxes:
+        contrast_check(r, video, boxes, fps, out, boxes_from_ocr)
+    if no_text_source:
         r.add('text', 'info', '没有文字位置数据，遮挡区只画框给人看', '装上 rapidocr-onnxruntime 会自动用 OCR 找字；也可以传 --text-dir（所有文字渲成纯品红的同帧 PNG）')
     ims = extract_frames(video, want, tile_w, out)
     tiles = [label(ims[f], f'{name} f{f} {f / fps:.2f}s', zones, boxes.get(f)) for f, name in picks if f in ims]
@@ -1300,6 +1487,9 @@ def main():
         apply_overrides(r, cfg)
         r.add('config', 'info', f'用了配置文件 {cfg_path}', '、'.join(f'{k}={cfg[k]}' for k in sorted(cfg) if k not in ('ignore', 'levels')) + (f'；忽略 {cfg["ignore"]}' if cfg.get('ignore') else '') + (f'；改级别 {cfg["levels"]}' if cfg.get('levels') else ''))
     locate_checks(r.checks, sc, fps)
+    for c in r.checks:
+        if c['level'] in ('fail', 'warn') and (h := fix_hint(c['id'])):
+            c['fix'] = h
     order = {'fail': 0, 'warn': 1, 'skip': 2, 'pass': 3, 'info': 4}
     summary = {k: r.count(k) for k in order}
     status = 'fail' if summary['fail'] else 'unmeasured' if summary['skip'] else 'pass'
@@ -1312,9 +1502,12 @@ def main():
             md.append('  ' + c['detail'].replace('\n', '\n  '))
         for w in c.get('where', []):
             md.append(f'  - → `{where_text(w, fps)}`')
+        if c.get('fix'):
+            md.append(f'  - 改法：{c["fix"]}')
     md += ['', '## 图', '', f'- {images["frame0"]}（第 0 帧原尺寸，单独看：刷到时就是这一帧）'] + [f'- {p}' for p in sheets] + ([f'- {images["frames"]}（--frames 指定的帧）'] if 'frames' in images else []) +([f'- {images["hits"]}（每个爆点 −16 / −3 / −1 / +2 帧：应当是 收暗 → 静止 → 静止 → 亮起）'] if 'hits' in images else []) + [f'- {images["curve"]}', '',
            '数值只是信号，最后的观感和听感要人确认。']
     (out / 'report.md').write_text('\n'.join(md), encoding='utf-8')
+    images['fix'] = str(write_fix(out, r.checks, video, fps))
     images['html'] = str(write_html(out, f'video-lint 报告：{sc.get("id") or video.name}', video, status, headline, r.checks, images, fps))
     (out / 'report.json').write_text(json.dumps({'tool': 'video-lint', 'version': VERSION, 'video': str(video), 'sidecar': a.sidecar, 'status': status, 'summary': summary, 'features': features, 'performance': sc.get('performance'), 'checks': r.checks, 'images': images}, ensure_ascii=False, indent=1), encoding='utf-8')
     print(f'{headline} → {out / "report.md"}')
