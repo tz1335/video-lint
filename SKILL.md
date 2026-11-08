@@ -10,7 +10,7 @@ Checks a rendered video with fixed rules and writes a report you can act on. It 
 ## Run it
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.4.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.5.0"
 video-lint final.mp4 --out lint-report
 video-lint final.mp4 --sidecar sidecar.json --platform tiktok --lufs -14 --strict
 # 不安装：pip install -r requirements.txt && python -I lint.py final.mp4
@@ -43,7 +43,9 @@ A sidecar JSON unlocks the timing checks. Times are in **frames**, the beat grid
   "format": "video-lint-sidecar/0",
   "fps": 30,
   "durationFrames": 900,
-  "shots": [{"name": "hook", "from": 0, "to": 90}],
+  "root": "/abs/path/to/project",
+  "sources": {"composition": {"file": "src/Video.tsx", "line": 12}},
+  "shots": [{"name": "hook", "from": 0, "to": 90, "source": {"file": "src/scenes/Hook.tsx", "line": 8}, "defined": {"file": "src/timeline.ts", "line": 4}}],
   "hits": [{"name": "drop", "frame": 243, "darkFrom": 220, "freeze": 3}],
   "sfx": [{"name": "impact", "frame": 243, "volume": 0.8}],
   "beats": {"period": 0.6663, "offset": 0.104, "source": "measured", "times": [0.104, 0.770]},
@@ -53,6 +55,7 @@ A sidecar JSON unlocks the timing checks. Times are in **frames**, the beat grid
 ```
 
 - `shots` → one contact-sheet frame per shot (4 frames before it cuts away)
+- `source` / `defined` / `sources.composition` (optional, paths relative to `root`) → every fail / warn gets `where: [{file, line, shot, from, to, timing, path}]` in `report.json`, the MCP result, `report.md` and the console. Open `path` at `line` to fix the shot; `timing` is where its frames are set
 - `hits` → darken / freeze / burst checks around the frame
 - `beats` → cut-on-beat check (±1.5 frames); without it the grid is estimated from audio and can only warn
 - `sfx` + `--loud name1,name2` → is each sound effect louder than the moment before it

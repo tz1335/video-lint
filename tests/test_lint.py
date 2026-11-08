@@ -328,7 +328,7 @@ def test_reading_speed_from_srt(tmp_path):
     r = lint_report(v, tmp_path / 'out', '--no-ocr', '--no-flash', '--captions', str(tmp_path / 'c.srt'))
     sp = r['by']['captions.speed']
     assert sp['level'] == 'warn'
-    assert sp['data'] == {'fast': 1, 'short': 1}
+    assert sp['data']['fast'] == 1 and sp['data']['short'] == 1 and len(sp['data']['at']) == 2
     assert '开头规则 2' in r['by']['open.rule2']['title'] if 'open.rule2' in r['by'] else True
 
 
@@ -451,3 +451,35 @@ def test_compare_reports_pure():
     new = [{'id': 'a', 'level': 'pass', 'title': 'A'}, {'id': 'b', 'level': 'warn', 'title': 'B'}, {'id': 'c', 'level': 'fail', 'title': 'C'}]
     fixed, added, still = lint.compare_reports(old, new)
     assert [c['id'] for c in fixed] == ['a'] and [c['id'] for c in added] == ['c'] and [c['id'] for c in still] == ['b']
+
+
+# —— 报错定位到源码 ——
+
+def test_where_points_to_source(tmp_path):
+    v = make_video(tmp_path / 'v.mp4', f'if(eq(N,0),0,{MOVING})', audio=TONE)  # 第 0 帧黑屏
+    sc = {'fps': FPS, 'durationFrames': 120, 'root': str(tmp_path),
+          'sources': {'composition': {'file': 'src/Video.tsx', 'line': 3}},
+          'shots': [{'name': 'hook', 'from': 0, 'to': 60, 'source': {'file': 'src/Hook.tsx', 'line': 12}, 'defined': {'file': 'src/timeline.ts', 'line': 7}},
+                    {'name': 'body', 'from': 60, 'to': 120}],
+          'hits': [], 'sfx': [], 'captions': []}
+    r = lint_report(v, tmp_path / 'out', '--no-ocr', sidecar=sc)
+    w = r['by']['open.frame0']['where'][0]
+    assert (w['file'], w['line'], w['shot'], w['from'], w['to']) == ('src/Hook.tsx', 12, 'hook', 0, 0)
+    assert w['timing'] == {'file': 'src/timeline.ts', 'line': 7}
+    assert Path(w['path']) == tmp_path / 'src' / 'Hook.tsx'
+    md = (tmp_path / 'out' / 'report.md').read_text(encoding='utf-8')
+    assert 'src/Hook.tsx:12（镜头 hook，第 0 帧' in md and '时间在 src/timeline.ts:7' in md
+    assert 'where' not in r['by']['meta']  # 只给 ✗ ⚠ 定位
+
+
+def test_where_falls_back_to_composition():
+    fps = 30
+    checks = [{'id': 'black', 'level': 'warn', 'title': '', 'detail': '', 'data': [[70, 80]]},
+              {'id': 'black', 'level': 'pass', 'title': '', 'detail': '', 'data': [[70, 80]]}]
+    sc = {'sources': {'composition': {'file': 'src/Video.tsx', 'line': 3}}, 'shots': [{'name': 'body', 'from': 60, 'to': 120}]}
+    lint.locate_checks(checks, sc, fps)
+    assert checks[0]['where'] == [{'from': 70, 'to': 80, 'file': 'src/Video.tsx', 'line': 3, 'count': 1, 'shot': 'body'}]
+    assert 'where' not in checks[1]
+    c2 = [{'id': 'black', 'level': 'warn', 'title': '', 'detail': '', 'data': [[70, 80]]}]
+    lint.locate_checks(c2, {'shots': [{'name': 'body', 'from': 60, 'to': 120}]}, fps)  # 旁注没有源码位置：不加 where
+    assert 'where' not in c2[0]

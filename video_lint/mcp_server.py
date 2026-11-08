@@ -54,7 +54,7 @@ def lint_video(
         flash: run the flash safety check.
 
     Returns status (pass / fail / unmeasured), a one-line headline, every fail / warn / skip check with its
-    detail, and the paths of report.md, report.html (self-contained, shareable) and report.json.
+    detail (plus `where`: source file:line, shot and frame range when the sidecar carries source locations), and the paths of report.md, report.html (self-contained, shareable) and report.json.
     Fix fail items first; warn items need a judgement; unmeasured means something could not be checked.
     """
     v = Path(video).expanduser().resolve()
@@ -78,7 +78,7 @@ def lint_video(
     return {
         'status': rep['status'],
         'headline': f'{s["fail"]} fail, {s["warn"]} warn, {s["pass"]} pass, {s["skip"]} unmeasured',
-        'problems': [{k: c[k] for k in ('id', 'level', 'title', 'detail')} for c in rep['checks'] if c['level'] in ('fail', 'warn', 'skip')],
+        'problems': [{k: c[k] for k in ('id', 'level', 'title', 'detail', 'where') if k in c} for c in rep['checks'] if c['level'] in ('fail', 'warn', 'skip')],
         'report_md': str(o / 'report.md'),
         'report_html': rep['images'].get('html'),
         'report_json': str(report),

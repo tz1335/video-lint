@@ -13,7 +13,7 @@ It started inside a Remotion project that makes short explainer videos; every ru
 ## Install · 安装
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.4.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.5.0"
 video-lint final.mp4
 ```
 
@@ -64,6 +64,23 @@ ignore = ["static", "hit.*"]    # intentional — record only · 故意为之的
 "spec" = "info"                 # change one check's level · 改单项检查的级别
 ```
 
+## Errors that point at your source · 报错直接指到源码
+
+If the sidecar says where each shot is drawn, every ✗ / ⚠ comes with a `file:line`, the way ESLint does:
+
+旁注里写了每个镜头在哪画，每个 ✗ / ⚠ 都会带上 `file:line`，像 ESLint 指到行号那样：
+
+```
+✗ Text inside the Douyin caption zone: 17 frames covered
+    → src/episodes/ep53-wake-up/scenes.tsx:112 (shot bedroom, frames 0–252; timing in timeline.ts:152)
+⚠ Cut off the beat at frame 1020
+    → src/scenes/Split.tsx:370 (shot split, frame 1020; timing in timeline.ts:156)
+```
+
+Add `source` (where it is drawn) and `defined` (where its timing lives) to shots, `source` to hits / sfx / captions, and `sources.composition` as the fallback; paths are relative to the sidecar's `root`. `report.json` and the MCP tool return the same as `where: [{file, line, shot, from, to, timing, path}]`, so an agent can open the file and fix it. Remotion projects in this repo get it for free from `sidecar.mjs`.
+
+给镜头加 `source`（在哪画）和 `defined`（时间写在哪），给爆点、音效、字幕加 `source`，再给一个 `sources.composition` 兜底；路径相对旁注里的 `root`。`report.json` 和 MCP 工具里同样有 `where: [{file, line, shot, from, to, timing, path}]`，agent 拿到就能打开文件去改。
+
 ## Before / after · 和上一版比
 
 ```bash
@@ -83,7 +100,7 @@ Every run also writes `report.html`: one self-contained file with the images emb
 ## GitHub Action
 
 ```yaml
-- uses: tz1335/video-lint@v0.4.0
+- uses: tz1335/video-lint@v0.5.0
   with:
     video: out/final.mp4
     args: --platform tiktok --lufs -14 --captions out/final.srt
@@ -97,7 +114,7 @@ Installs ffmpeg and video-lint, writes the report to the job summary, uploads th
 ## MCP server · 给 agent 用
 
 ```bash
-pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.4.0"
+pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.5.0"
 claude mcp add video-lint -- video-lint-mcp
 ```
 

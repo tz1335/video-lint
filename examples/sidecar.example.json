@@ -5,21 +5,51 @@
  "width": 1080,
  "height": 1920,
  "durationFrames": 900,
+ "sources": {
+  "composition": {
+   "file": "src/Video.tsx",
+   "line": 12
+  }
+ },
  "shots": [
   {
    "name": "hook",
    "from": 0,
-   "to": 90
+   "to": 90,
+   "source": {
+    "file": "src/scenes/Hook.tsx",
+    "line": 8
+   },
+   "defined": {
+    "file": "src/timeline.ts",
+    "line": 4
+   }
   },
   {
    "name": "body",
    "from": 90,
-   "to": 780
+   "to": 780,
+   "source": {
+    "file": "src/scenes/Body.tsx",
+    "line": 15
+   },
+   "defined": {
+    "file": "src/timeline.ts",
+    "line": 5
+   }
   },
   {
    "name": "outro",
    "from": 780,
-   "to": 900
+   "to": 900,
+   "source": {
+    "file": "src/scenes/Outro.tsx",
+    "line": 6
+   },
+   "defined": {
+    "file": "src/timeline.ts",
+    "line": 6
+   }
   }
  ],
  "hits": [
@@ -27,14 +57,22 @@
    "name": "drop",
    "frame": 243,
    "darkFrom": 220,
-   "freeze": 3
+   "freeze": 3,
+   "source": {
+    "file": "src/timeline.ts",
+    "line": 9
+   }
   }
  ],
  "sfx": [
   {
    "name": "impact",
    "frame": 243,
-   "volume": 0.8
+   "volume": 0.8,
+   "source": {
+    "file": "src/timeline.ts",
+    "line": 14
+   }
   }
  ],
  "beats": {

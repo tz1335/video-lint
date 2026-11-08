@@ -30,7 +30,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = '0.4.0'
+VERSION = '0.5.0'
 # 「要听得见」的音效：冲击、动作音；whoosh、swish、paper、room 这类本来就轻，不查
 LOUD_DEFAULT = ['impact', 'press', 'drop', 'chime', 'bell', 'clink', 'stamp', 'coin', 'tick', 'gunshot', 'crack', 'chapter', 'footstep', 'bloom']
 ZONES_FILE = Path(__file__).with_name('zones.json')
@@ -247,7 +247,8 @@ def text_checks(r, boxes, zones, sc, fps, aspect, source='文字层（Remotion �
         r.add('text.zones', lv, f'文字进{zones["name"]}遮挡区：{len({h[2] for h in bad})} 帧有字被盖住、{len(by_frame) - len({h[2] for h in bad})} 帧只擦边' if hits else f'文字都没进{zones["name"]}遮挡区',
               f'查了 {len(boxes)} 帧的{source}，联系表上青框是识别出的文字行；「盖住」= 至少一个字在区里。' + ('\n' + '\n'.join(rows) if rows else ''),
               [{'frame': f, 'zone': name, 'covered': c, 'overlap': round(k, 3), 'box': b} for c, k, f, name, b in hits])
-    r.add('text.edge', 'warn' if edges else 'pass', f'有 {len(edges)} 行文字贴边，可能出画' if edges else '文字都没贴边', '\n'.join(f'  - {e}' for e in edges[:20]))
+    r.add('text.edge', 'warn' if edges else 'pass', f'有 {len(edges)} 行文字贴边，可能出画' if edges else '文字都没贴边', '\n'.join(f'  - {e}' for e in edges[:20]),
+          {'frames': sorted({int(re.match(r'第 (\d+) 帧', e).group(1)) for e in edges})})
     if heights:
         early = [h for h, f in heights if f < 2 * fps]
         small = sorted(heights)[:3]
@@ -578,7 +579,7 @@ CJK = re.compile(r'[㐀-鿿豈-﫿぀-ヿ가-힯]')
 def reading_speed_check(r, caps, fps):
     """每条字幕每秒要读多少字：中日韩文字超过 9 字 / 秒、其它文字超过 20 字符 / 秒 ⚠；停留不到 5/6 秒 ⚠（Netflix 字幕规范）。
     旁注里「主句 / 副句」这种双语或两层字幕只算主句。"""
-    fast, short = [], []
+    fast, short, bad_at = [], [], []
     for c in caps:
         main = c['text'].split(' / ')[0]
         sec = max((c['to'] - c['from']) / fps, 1e-3)
@@ -587,13 +588,15 @@ def reading_speed_check(r, caps, fps):
             n, limit, unit = cjk + len(re.findall(r'[A-Za-z0-9]+', main)), 9, '字'
         else:
             n, limit, unit = len(re.sub(r'\s+', ' ', main).strip()), 20, '字符'
+        if n / sec > limit or sec < 5 / 6:
+            bad_at.append((c['from'], c['to']))
         if n / sec > limit:
             fast.append(f'  - {c["from"] / fps:.2f} 秒「{main[:24]}」{n} {unit} / {sec:.2f} 秒 = {n / sec:.1f} {unit}/秒（上限 {limit}）')
         if sec < 5 / 6:
             short.append(f'  - {c["from"] / fps:.2f} 秒「{main[:24]}」只停留 {sec:.2f} 秒')
     lv = 'warn' if fast or short else 'pass'
     r.add('captions.speed', lv, f'字幕阅读速度：{len(caps)} 条里 {len(fast)} 条太快、{len(short)} 条停留太短' if lv == 'warn' else f'字幕阅读速度：{len(caps)} 条都读得完',
-          '标准（Netflix 字幕规范）：中文每秒不超过 9 个字，英文每秒不超过 20 个字符，每条至少停留 5/6 秒。' + ('\n' + '\n'.join(fast[:20] + short[:10]) if lv == 'warn' else ''), {'fast': len(fast), 'short': len(short)})
+          '标准（Netflix 字幕规范）：中文每秒不超过 9 个字，英文每秒不超过 20 个字符，每条至少停留 5/6 秒。' + ('\n' + '\n'.join(fast[:20] + short[:10]) if lv == 'warn' else ''), {'fast': len(fast), 'short': len(short), 'at': bad_at})
 
 
 def audio_mono(video, sr=48000):
@@ -818,6 +821,96 @@ def compare_check(r, path):
           {'fixed': [c['id'] for c in fixed], 'added': [c['id'] for c in added], 'still': [c['id'] for c in still], 'previous': str(p_)})
 
 
+# —— 报错定位到源码 ——
+# 旁注里的镜头、爆点、音效、字幕可以带 source: {file, line}（相对旁注的 root），sources.composition 是整片的入口组件。
+# 每个 ✗ / ⚠ 检查先换算出「出事的帧段」，再落到镜头，最后给出 file:line，像 ESLint 指到行号那样。
+def _check_ranges(c, sc, fps):
+    """一条检查出事的帧段：[(起帧, 止帧, 旁注里直接对应的 source 或 None)]"""
+    cid, d = c['id'], c.get('data')
+    two = int(2 * fps) - 1
+    by_frame = lambda items, f: next((x.get('source') for x in items if x.get('frame') == f or x.get('from') == f), None)
+    try:
+        if cid in ('open.frame0', 'audio.open'):
+            return [(0, 0, None)]
+        if cid == 'open.rule5' and sc.get('captions'):  # 8 秒内没有数字：改的是字幕稿
+            caps = [x for x in sc['captions'] if x['from'] < 8 * fps] or sc['captions'][:1]
+            return [(caps[0]['from'], caps[-1]['to'], caps[0].get('source'))]
+        if cid.startswith('open.rule'):
+            return [(0, two, None)]
+        if cid == 'open.black':
+            return [(d['frames'][0], d['frames'][-1], None)]
+        if cid in ('black', 'static'):
+            return [(int(a), int(b), None) for a, b in d]
+        if cid.startswith('flash'):
+            return [(x['from'], x['to'], None) for x in d]
+        if cid == 'text.zones':
+            bad = [x['frame'] for x in d if x['covered']] or [x['frame'] for x in d]
+            return [(f, f, None) for f in sorted(set(bad))]
+        if cid == 'text.edge':
+            return [(f, f, None) for f in d['frames']]
+        if cid.startswith('hit.'):
+            h = next(h for h in sc.get('hits', []) if h['name'] == cid[4:])
+            return [(max(0, h['frame'] - 6), h['frame'] + 4, h.get('source'))]
+        if cid == 'beats.cuts':
+            return [(f, f, None) for f in d['offBeat']]
+        if cid == 'audio.sfx':
+            ev = d['events'] if isinstance(d, dict) else d
+            ev = [x for x in ev if x.get('smr', -99) < -10 and x.get('smrHi', -99) < -10] if isinstance(d, dict) else ev
+            return [(x['frame'], x['frame'] + int(0.3 * fps), by_frame(sc.get('sfx', []), x['frame'])) for x in ev]
+        if cid == 'captions.speed':
+            return [(a, b, by_frame(sc.get('captions', []), a)) for a, b in d['at']]
+        if cid == 'mono':
+            return [(int(t * fps), int((t + 0.5) * fps), None) for t, _ in d['segments']]
+    except (KeyError, TypeError, IndexError, StopIteration):
+        pass
+    return []
+
+
+def locate_checks(checks, sc, fps):
+    """给每个 ✗ / ⚠ 检查补上 where：[{from, to, shot?, file, line?, path?}]，按 文件 + 行 + 镜头 合并"""
+    shots = sc.get('shots') or []
+    comp = (sc.get('sources') or {}).get('composition')
+    root = sc.get('root')
+    for c in checks:
+        if c['level'] not in ('fail', 'warn'):
+            continue
+        found = {}
+
+        def put(a, b, loc, shot=None, what=None, timing=None):
+            if not loc or not loc.get('file'):
+                return
+            k = (loc['file'], loc.get('line'), shot)
+            w = found.setdefault(k, {'from': a, 'to': b, 'file': loc['file'], 'line': loc.get('line'), 'count': 0})
+            w['from'], w['to'], w['count'] = min(w['from'], a), max(w['to'], b), w['count'] + 1
+            if shot:
+                w['shot'] = shot
+            if what or loc.get('what'):
+                w['what'] = what or loc.get('what')
+            if timing and (timing.get('file'), timing.get('line')) != (loc['file'], loc.get('line')):
+                w['timing'] = {'file': timing['file'], 'line': timing.get('line')}
+            if root:
+                w['path'] = str(Path(root) / loc['file'])
+
+        for a, b, src in _check_ranges(c, sc, fps):
+            put(a, b, src)
+            hit = [sh for sh in shots if sh['from'] <= b and a < sh['to']]
+            for sh in hit:
+                cl = comp if isinstance(comp, dict) else {'file': comp} if comp else None
+                put(max(a, sh['from']), min(b, sh['to'] - 1), sh.get('source') or sh.get('defined') or cl, sh['name'], timing=sh.get('defined'))
+            if not hit and not src and comp:
+                put(a, b, comp if isinstance(comp, dict) else {'file': comp})
+        if found:
+            c['where'] = list(found.values())[:8]
+
+
+def where_text(w, fps):
+    loc = f'{w["file"]}:{w["line"]}' if w.get('line') else w['file']
+    span = f'第 {w["from"]} 帧' if w['from'] == w['to'] else f'第 {w["from"]}–{w["to"]} 帧'
+    tm = w.get('timing')
+    tm = f'；时间在 {tm["file"]}:{tm["line"]}' if tm and tm.get('line') else ''
+    return f'{loc}（' + (f'镜头 {w["shot"]}，' if w.get('shot') else '') + f'{span}，{w["from"] / fps:.2f} 秒' + (f'，{w["what"]}' if w.get('what') else '') + tm + '）'
+
+
 # —— 单文件 HTML 报告（图片内嵌，发给别人一个文件就能看）——
 LEVEL_NAME = {'fail': '问题', 'warn': '提醒', 'skip': '没法查', 'pass': '通过', 'info': '记录'}
 
@@ -830,14 +923,15 @@ def _img_tag(path, alt):
     return f'<figure><img src="data:{mime};base64,{data}" alt="{_html.escape(alt)}" loading="lazy"><figcaption>{_html.escape(alt)}</figcaption></figure>'
 
 
-def write_html(out, title, video, status, headline, checks, images):
+def write_html(out, title, video, status, headline, checks, images, fps=30):
     order = {'fail': 0, 'warn': 1, 'skip': 2, 'pass': 3, 'info': 4}
     rows = []
     for c in sorted(checks, key=lambda c: order[c['level']]):
         detail = _html.escape(c['detail'] or '').replace('\n', '<br>')
         rows.append(f'<details class="chk {c["level"]}" data-level="{c["level"]}"{" open" if c["level"] in ("fail", "warn") else ""}>'
                     f'<summary><span class="lv">{ICON[c["level"]]} {LEVEL_NAME[c["level"]]}</span>{_html.escape(c["title"])}<code>{_html.escape(c["id"])}</code></summary>'
-                    + (f'<div class="detail">{detail}</div>' if detail else '') + '</details>')
+                    + (f'<div class="detail">{detail}</div>' if detail else '')
+                    + ''.join(f'<div class="where">→ <code>{_html.escape(where_text(w, fps))}</code></div>' for w in c.get('where', [])) + '</details>')
     figs = _img_tag(images.get('frame0'), '第 0 帧（刷到时看到的）') + ''.join(_img_tag(p_, f'联系表 {i + 1}') for i, p_ in enumerate(images.get('sheets', [])))
     figs += _img_tag(images.get('hits'), '爆点前后：−16 / −3 / −1 / +2 帧') + _img_tag(images.get('frames'), '指定帧') + _img_tag(images.get('curve'), '亮度和运动曲线')
     counts = {k: sum(1 for c in checks if c['level'] == k) for k in order}
@@ -853,7 +947,7 @@ main{{max-width:1100px;margin:0 auto;padding:28px 16px 48px}}h1{{font-size:22px;
 .chk{{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--info);border-radius:8px;margin:8px 0;padding:8px 12px}}
 .chk.fail{{border-left-color:var(--fail)}}.chk.warn{{border-left-color:var(--warn)}}.chk.skip{{border-left-color:var(--skip)}}.chk.pass{{border-left-color:var(--pass)}}
 summary{{cursor:pointer;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}}.lv{{font-weight:600;white-space:nowrap}}summary code{{margin-left:auto;color:var(--muted);font-size:12px}}
-.detail{{margin-top:6px;color:var(--muted);font-size:14px;white-space:normal}}figure{{margin:16px 0}}figure img{{max-width:100%;border-radius:8px;border:1px solid var(--line)}}figcaption{{color:var(--muted);font-size:13px}}
+.where{{margin-top:4px;font-size:13px}}.where code{{white-space:normal}}.detail{{margin-top:6px;color:var(--muted);font-size:14px;white-space:normal}}figure{{margin:16px 0}}figure img{{max-width:100%;border-radius:8px;border:1px solid var(--line)}}figcaption{{color:var(--muted);font-size:13px}}
 footer{{color:var(--muted);font-size:13px;margin-top:24px}}
 </style></head><body><main>
 <h1>{_html.escape(title)}</h1><p class="sub">{_html.escape(str(video))}</p>
@@ -1205,6 +1299,7 @@ def main():
     if cfg:
         apply_overrides(r, cfg)
         r.add('config', 'info', f'用了配置文件 {cfg_path}', '、'.join(f'{k}={cfg[k]}' for k in sorted(cfg) if k not in ('ignore', 'levels')) + (f'；忽略 {cfg["ignore"]}' if cfg.get('ignore') else '') + (f'；改级别 {cfg["levels"]}' if cfg.get('levels') else ''))
+    locate_checks(r.checks, sc, fps)
     order = {'fail': 0, 'warn': 1, 'skip': 2, 'pass': 3, 'info': 4}
     summary = {k: r.count(k) for k in order}
     status = 'fail' if summary['fail'] else 'unmeasured' if summary['skip'] else 'pass'
@@ -1215,15 +1310,19 @@ def main():
         md.append(f'- {ICON[c["level"]]} **{c["title"]}**' + (f'　{c["detail"]}' if c['detail'] and '\n' not in c['detail'] else ''))
         if c['detail'] and '\n' in c['detail']:
             md.append('  ' + c['detail'].replace('\n', '\n  '))
+        for w in c.get('where', []):
+            md.append(f'  - → `{where_text(w, fps)}`')
     md += ['', '## 图', '', f'- {images["frame0"]}（第 0 帧原尺寸，单独看：刷到时就是这一帧）'] + [f'- {p}' for p in sheets] + ([f'- {images["frames"]}（--frames 指定的帧）'] if 'frames' in images else []) +([f'- {images["hits"]}（每个爆点 −16 / −3 / −1 / +2 帧：应当是 收暗 → 静止 → 静止 → 亮起）'] if 'hits' in images else []) + [f'- {images["curve"]}', '',
            '数值只是信号，最后的观感和听感要人确认。']
     (out / 'report.md').write_text('\n'.join(md), encoding='utf-8')
-    images['html'] = str(write_html(out, f'video-lint 报告：{sc.get("id") or video.name}', video, status, headline, r.checks, images))
+    images['html'] = str(write_html(out, f'video-lint 报告：{sc.get("id") or video.name}', video, status, headline, r.checks, images, fps))
     (out / 'report.json').write_text(json.dumps({'tool': 'video-lint', 'version': VERSION, 'video': str(video), 'sidecar': a.sidecar, 'status': status, 'summary': summary, 'features': features, 'performance': sc.get('performance'), 'checks': r.checks, 'images': images}, ensure_ascii=False, indent=1), encoding='utf-8')
     print(f'{headline} → {out / "report.md"}')
     for c in r.checks:
         if c['level'] in ('fail', 'warn', 'skip'):
             print(f'  {ICON[c["level"]]} {c["title"]}')
+            for w in c.get('where', [])[:3]:
+                print(f'      → {where_text(w, fps)}')
     sys.exit(EXIT[status] if a.strict else 0)
 
 
