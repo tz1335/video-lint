@@ -13,7 +13,7 @@ It started inside a Remotion project that makes short explainer videos; every ru
 ## Install · 安装
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.7.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.8.0"
 video-lint final.mp4
 ```
 
@@ -63,6 +63,17 @@ ignore = ["static", "hit.*"]    # intentional — record only · 故意为之的
 [levels]
 "spec" = "info"                 # change one check's level · 改单项检查的级别
 ```
+
+## Cover check · 封面检查
+
+```bash
+video-lint final.mp4 --cover cover-3x4.png --cover cover-4x3.png
+video-lint --cover cover-3x4.png          # covers only, no video · 只查封面
+```
+
+For each cover: size and aspect ratio; whether the largest line is still readable when shrunk to a list tile (portrait covers: a 3-column profile grid, about 130 CSS px wide; landscape: about 180 — estimates, change with `--cover-tile`), judged by text height in CSS pixels and by OCR on the shrunken image; which title-sized lines a centre crop to 1:1 (portrait) or 16:9 (landscape) would cut (recorded only — which pages crop like this hasn't been measured); text contrast. It also writes `cover-*.jpg`: the cover with crop and text boxes, next to the tile-size version.
+
+每张封面查：尺寸和画幅；缩到列表格子里最大那行字还读不读得清（竖封面按主页一行 3 格、一格约 130 CSS 像素宽，横封面约 180，都是估计值，可以用 `--cover-tile` 改），按字高的 CSS 像素和缩小后 OCR 能不能读回来两样判；居中裁成 1:1（竖封面）或 16:9（横封面）会切到哪些标题级的字（只记录，哪些页面这样裁还没实测）；文字对比度。还会出一张 `cover-*.jpg`：原图画上裁切框和文字框，旁边是格子大小的样子。
 
 ## Why did viewers leave here? · 留存归因
 
@@ -144,7 +155,7 @@ Every run also writes `report.html`: one self-contained file with the images emb
 ## GitHub Action
 
 ```yaml
-- uses: tz1335/video-lint@v0.7.0
+- uses: tz1335/video-lint@v0.8.0
   with:
     video: out/final.mp4
     args: --platform tiktok --lufs -14 --captions out/final.srt
@@ -158,11 +169,11 @@ Installs ffmpeg and video-lint, writes the report to the job summary, uploads th
 ## MCP server · 给 agent 用
 
 ```bash
-pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.7.0"
+pipx install "video-lint[mcp,ocr] @ git+https://github.com/tz1335/video-lint@v0.8.0"
 claude mcp add video-lint -- video-lint-mcp
 ```
 
-Tools: `lint_video(video, platform, lufs, captions, sidecar, sfx_audio, out, compare, ocr, flash)` returns the status, every ✗ / ⚠ / ? check with its `where` and `fix`, and the report paths (including `fix.md`); `verify_fix(video, previous, ...)` re-checks a new render against the previous report and returns `fixed` / `added` / `still` and `done`; `list_platforms()` lists platforms with their zone and spec data. Works with Claude Code, Cursor and any other MCP client.
+Tools: `lint_video(video, platform, lufs, captions, sidecar, sfx_audio, out, compare, ocr, flash, covers)` returns the status, every ✗ / ⚠ / ? check with its `where` and `fix`, and the report paths (including `fix.md`); `verify_fix(video, previous, ...)` re-checks a new render against the previous report and returns `fixed` / `added` / `still` and `done`; `list_platforms()` lists platforms with their zone and spec data. Works with Claude Code, Cursor and any other MCP client.
 
 工具：`lint_video` 返回整体状态、所有 ✗ / ⚠ / ? 的检查（带位置 `where` 和改法 `fix`）和报告路径（包括 `fix.md`）；`verify_fix` 改完后重新检查并和上一版比，返回修好、新出现、还在的问题和 `done`；`list_platforms` 列出支持的平台和它们的遮挡区、规格数据。Claude Code、Cursor 和其它支持 MCP 的客户端都能用。
 

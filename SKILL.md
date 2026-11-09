@@ -10,7 +10,7 @@ Checks a rendered video with fixed rules and writes a report you can act on. It 
 ## Run it
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.7.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.8.0"
 video-lint final.mp4 --out lint-report
 video-lint final.mp4 --sidecar sidecar.json --platform tiktok --lufs -14 --strict
 # 不安装：pip install -r requirements.txt && python -I lint.py final.mp4
@@ -70,6 +70,7 @@ A sidecar JSON unlocks the timing checks. Times are in **frames**, the beat grid
 - `.video-lint.toml` (next to the video or above) sets defaults — platform, lufs, loud, captions, ignore = [check ids, globs ok], [levels] overrides; flags win
 - `report.html` is written every run: one self-contained file to hand to a person
 - MCP: `video-lint-mcp` exposes `lint_video` and `list_platforms` (install the `[mcp]` extra)
+- Covers: `--cover file.png` (repeatable; works without a video) → `cover.<3x4|4x3>.size / .feed / .crop / .contrast`. feed warns when the largest line is under 9 CSS px at list-tile size (portrait 130 CSS px wide, landscape 180, `--cover-tile` to change) or OCR can't read it back from the shrunken image; crop is info only; sidecar `sources.covers` points cover issues at the cover component
 - Retention attribution: sidecar `performance` {bounce2s, completion, valleys [[s,e]], bouncePeaks [[s,e,share,peerShare]], retention [[s,v]], peers [[s,v]]} → info check `retention.why`: events (cuts, shots, captions, hits, sfx, `marks` [{name, frame}], black, frozen, brightness jumps, loudness rises / drops, first sound) inside each drop window, looking 1 s back. Lists, never judges. `report.json` has `events` and `features.openEvents` / `firstCutSec`
 - Every fail / warn has a `fix` hint; every run writes `fix.md` (to-do list: fails first, where + how). Loop: lint → edit per fix.md → re-render → lint again with `--compare <previous report>` (different `--out`) until no fail and nothing in `added`. MCP: `verify_fix(video, previous)` returns fixed / added / still / done
 - Loudness jump: ≥ 15 dB louder within 1 s (not out of silence, not within 0.4 s of a sidecar hit) → warn; dead air: ≥ 1 s below −50 dBFS mid-video → warn

@@ -30,7 +30,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = '0.7.0'
+VERSION = '0.8.0'
 # 「要听得见」的音效：冲击、动作音；whoosh、swish、paper、room 这类本来就轻，不查
 LOUD_DEFAULT = ['impact', 'press', 'drop', 'chime', 'bell', 'clink', 'stamp', 'coin', 'tick', 'gunshot', 'crack', 'chapter', 'footstep', 'bloom']
 ZONES_FILE = Path(__file__).with_name('zones.json')
@@ -764,6 +764,152 @@ def retention_check(r, perf, sc, fps, n):
     r.add('retention', 'info', f'发布数据：{head}', f'来源：{src}。完播率画在片尾，是近似。\n' + '\n'.join(f'  - {l}' for l in lines), rows)
 
 
+# —— 封面检查 ——
+# 抖音主页的作品格是一行 3 个：手机屏宽约 390 个 CSS 像素，一格约 130 宽。封面在那里最小，字要在那里还能读。
+GRID_TILE_CSS = 130       # 竖封面：主页一行 3 格
+GRID_TILE_CSS_WIDE = 180  # 横封面：搜索结果、双列这类更宽的位置（估计，没有实测）
+COVER_MIN_TEXT_CSS = 9  # 一格里字高不到 9 个 CSS 像素，基本就糊成一条了
+COVER_ASPECTS = {'3:4': 3 / 4, '4:3': 4 / 3, '9:16': 9 / 16, '16:9': 16 / 9, '1:1': 1.0}
+
+
+def ocr_lines(engine, im):
+    """OCR 一张图，返回 [(行框 0–1, 文字, 置信度)]（不合并，要拿文字去比）"""
+    W, H = im.size
+    result, _ = engine(np.asarray(im.convert('RGB'))[:, :, ::-1].copy())
+    out = []
+    for poly, text, score in result or []:
+        if float(score) < 0.5 or not re.search(r'[0-9A-Za-z一-鿿]', text):
+            continue
+        xs, ys = [p_[0] for p_ in poly], [p_[1] for p_ in poly]
+        cy, hh = (min(ys) + max(ys)) / 2, (max(ys) - min(ys)) * OCR_SHRINK / 2
+        out.append(((max(0, min(xs)) / W, max(0, cy - hh) / H, min(W, max(xs)) / W, min(H, cy + hh) / H), text.strip(), float(score)))
+    return out
+
+
+def _norm_text(t):
+    return re.sub(r'[\s，。？！、,.?!·:：—\-]', '', t).lower()
+
+
+def cover_crops(aspect):
+    """封面被裁成别的画幅时留下的区域（居中裁）：竖封面看 1:1（方形列表、分享卡片），横封面看 16:9（横版列表）"""
+    targets = {'1:1': 1.0} if aspect < 1 else {'16:9': 16 / 9}
+    crops = {}
+    for name, t in targets.items():
+        if aspect < t:  # 更宽的目标：上下裁
+            h = aspect / t
+            crops[name] = (0.0, (1 - h) / 2, 1.0, (1 + h) / 2)
+        else:  # 更窄的目标：左右裁
+            w = t / aspect
+            crops[name] = ((1 - w) / 2, 0.0, (1 + w) / 2, 1.0)
+    return crops
+
+
+def cover_check(r, path, out, engine, key, tile_css=None):
+    """一张封面：尺寸画幅、缩到主页格子里还读不读得出、被裁成别的画幅会不会切到字、文字对比度"""
+    from difflib import SequenceMatcher
+    path = Path(path)
+    label = f'{path.parent.name}/{path.name}' if path.parent.name else path.name
+    im = Image.open(path).convert('RGB')
+    W, H = im.size
+    aspect = W / H
+    near = min(COVER_ASPECTS, key=lambda k: abs(COVER_ASPECTS[k] - aspect))
+    off = abs(COVER_ASPECTS[near] - aspect) / COVER_ASPECTS[near]
+    issues = ([f'画幅 {W}×{H} 不是常见比例（最接近 {near}）'] if off > 0.01 else []) + ([f'短边 {min(W, H)} 像素，低于 720'] if min(W, H) < 720 else [])
+    r.add(f'cover.{key}.size', 'warn' if issues else 'pass', f'封面 {label}：{W}×{H}（{near}）' + ('，' + '；'.join(issues) if issues else ''),
+          '抖音竖版封面常用 3:4（1080×1440），横版 4:3（1440×1080）；短边至少 720。', {'width': W, 'height': H, 'aspect': near})
+    tile_w = tile_css or (GRID_TILE_CSS if aspect <= 1 else GRID_TILE_CSS_WIDE)
+    tile_h = tile_w / aspect
+    thumb = im.resize((tile_w * 2, max(1, round(tile_w * 2 / aspect))), Image.LANCZOS)  # 2 倍屏上一格的实际像素
+    if engine is None:
+        r.add(f'cover.{key}.feed', 'info', f'封面 {label}：没装 OCR，缩小后读不读得出没法查', '装上 rapidocr-onnxruntime 就会查；先看 cover-*.jpg 里缩小后的样子')
+        lines = []
+    else:
+        big = im if max(W, H) <= 1600 else im.resize((round(W * 1600 / max(W, H)), round(H * 1600 / max(W, H))), Image.LANCZOS)
+        # 封面要拿认出的字下结论，比视频帧要求严：置信度 ≥ 0.8（ep58 封面上卡牌花纹被认成「大式式国」，置信度 0.58）
+        lines = [x for x in ocr_lines(engine, big) if len(_norm_text(x[1])) >= 2 and x[2] >= 0.8]
+        small_txt = [_norm_text(t) for _, t, _ in ocr_lines(engine, thumb.resize((thumb.width * 2, thumb.height * 2), Image.LANCZOS))]
+        rows, lost, title = [], [], None
+        for b, t, _ in sorted(lines, key=lambda x: -(x[0][3] - x[0][1])):
+            css = (b[3] - b[1]) * tile_h
+            seen = max((SequenceMatcher(None, _norm_text(t), s_).ratio() for s_ in small_txt), default=0)
+            ok = seen >= 0.6
+            title = title or (t, css, ok)
+            rows.append(f'  - 「{t[:16]}」字高 {css:.1f} CSS 像素' + ('' if ok else '，缩小后认不出') + ('（太小）' if css < COVER_MIN_TEXT_CSS else ''))
+            if not ok or css < COVER_MIN_TEXT_CSS:
+                lost.append(t)
+        if not lines:
+            r.add(f'cover.{key}.feed', 'warn', f'封面 {label}：没认出字', '封面上没有字、或者字太花 OCR 认不出；信息流里观众只看一眼封面，最好有一句大字。')
+        else:
+            bad_title = title[1] < COVER_MIN_TEXT_CSS or not title[2]
+            r.add(f'cover.{key}.feed', 'warn' if bad_title else 'pass',
+                  f'封面 {label} 缩到列表里（一格约 {tile_w}×{tile_h:.0f} CSS 像素）：' + (f'最大的字「{title[0][:10]}」也读不清' if bad_title else f'最大的字「{title[0][:10]}」{title[1]:.0f} CSS 像素，读得清')
+                  + (f'；{len(lost)} 行小字糊掉' if lost and not bad_title else ''),
+                  f'按{"主页一行 3 格" if aspect <= 1 else "搜索 / 双列"}估：一格约 {tile_w} CSS 像素宽（估计值，可以用 --cover-tile 改），字高低于 {COVER_MIN_TEXT_CSS} CSS 像素基本读不出；「认不出」= 缩成 2 倍屏的格子大小后 OCR 读不回原文（OCR 只是近似，人眼通常比它好一点）。\n' + '\n'.join(rows[:12]),
+                  {'tileCss': [tile_w, round(tile_h)], 'lines': [{'text': t, 'box': [round(v, 4) for v in b], 'css': round((b[3] - b[1]) * tile_h, 1)} for b, t, _ in lines], 'lost': lost})
+        # 被裁成别的画幅
+        crops = cover_crops(aspect)
+        cut = []
+        top = max((b[3] - b[1] for b, _, _ in lines), default=0)
+        for name, (cx0, cy0, cx1, cy1) in crops.items():
+            for b, t, _ in lines:
+                if b[3] - b[1] < 0.6 * top:
+                    continue  # 只看标题级的大字：雷达标签、人名这类小字裁掉了也不影响读题
+                inside = b[0] >= cx0 - 0.005 and b[2] <= cx1 + 0.005 and b[1] >= cy0 - 0.005 and b[3] <= cy1 + 0.005
+                if not inside:
+                    gone = b[2] <= cx0 or b[0] >= cx1 or b[3] <= cy0 or b[1] >= cy1
+                    cut.append((name, t, gone))
+        # 各平台、各页面怎么裁没有实测，所以只记录不提醒
+        r.add(f'cover.{key}.crop', 'info' if cut else 'pass',
+              f'封面 {label} 如果被居中裁成 {"、".join(crops)}：' + (f'标题级的字有 {len(cut)} 行会被切到' if cut else '标题级的字都在里面'),
+              '有的页面可能把封面居中裁成别的画幅（竖封面裁成方形、横封面裁成 16:9）。哪些页面这样裁还没实测，所以只记录；要紧的字放在中间更稳。只看字高不小于最大一行 60% 的字。'
+              + ('\n' + '\n'.join(f'  - {n}：「{t[:16]}」' + ('整行裁掉' if g else '被切了一部分') for n, t, g in cut[:12]) if cut else ''),
+              {'crops': {k: [round(v, 4) for v in c] for k, c in crops.items()}, 'cut': [{'crop': n, 'text': t, 'gone': g} for n, t, g in cut]})
+        # 文字对比度（只看字高 ≥ 3% 的大字）
+        arr = np.asarray(big.convert('RGB'), np.float32)
+        BH, BW = arr.shape[:2]
+        low = []
+        for b, t, _ in lines:
+            if b[3] - b[1] < 0.03:
+                continue
+            pad = 0.15 * (b[3] - b[1])
+            crop = arr[max(0, int((b[1] - pad) * BH)):int((b[3] + pad) * BH) + 1, max(0, int((b[0] - pad / aspect) * BW)):int((b[2] + pad / aspect) * BW) + 1]
+            c = text_contrast(crop)
+            if c is not None and c < 3:
+                low.append((t, c))
+        r.add(f'cover.{key}.contrast', 'warn' if low else 'pass', f'封面 {label} 文字对比度：' + (f'{len(low)} 行大字低于 3:1' if low else '大字都在 3:1 以上'),
+              '标准 WCAG 1.4.3：大字至少 3:1。封面缩小以后对比度不够的字最先糊掉。' + ('\n' + '\n'.join(f'  - 「{t[:16]}」{c:.1f}:1' for t, c in low) if low else ''),
+              [{'text': t, 'ratio': round(c, 2)} for t, c in low])
+    # 预览图：原图（画出裁切框和识别到的字）+ 主页格子大小（放大回来看，像素感就是手机上的样子）
+    from PIL import ImageDraw
+    show_h = 720
+    big_show = im.resize((round(show_h * aspect), show_h), Image.LANCZOS)
+    d = ImageDraw.Draw(big_show)
+    for name, (cx0, cy0, cx1, cy1) in cover_crops(aspect).items():
+        d.rectangle([cx0 * big_show.width, cy0 * show_h, cx1 * big_show.width - 1, cy1 * show_h - 1], outline=(255, 210, 0), width=3)
+        d.text((cx0 * big_show.width + 8, cy0 * show_h + 6), name, fill=(255, 210, 0))
+    for b, _, _ in lines:
+        d.rectangle([b[0] * big_show.width, b[1] * show_h, b[2] * big_show.width, b[3] * show_h], outline=(0, 230, 255), width=2)
+    tile = thumb.resize((tile_w, round(tile_h)), Image.LANCZOS).resize((round(tile_w * 3), round(tile_h * 3)), Image.NEAREST)
+    sheet = Image.new('RGB', (big_show.width + tile.width + 30, max(show_h, tile.height) + 40), (24, 24, 24))
+    sheet.paste(big_show, (10, 30))
+    sheet.paste(tile, (big_show.width + 20, 30))
+    ImageDraw.Draw(sheet).text((10, 8), f'cover-{key}  yellow = centre crop, cyan = text found;  right: list tile ({tile_w} css px wide) x3', fill=(220, 220, 220))
+    dst = Path(out) / f'cover-{key}.jpg'
+    sheet.save(dst, quality=88)
+    return str(dst)
+
+
+def run_covers(r, covers, out, tile_css=None):
+    engine = ocr_engine()
+    keys, shots = {}, []
+    for c in covers:
+        W, H = Image.open(c).size
+        k = min(COVER_ASPECTS, key=lambda k: abs(COVER_ASPECTS[k] - W / H)).replace(':', 'x')
+        keys[k] = keys.get(k, 0) + 1
+        shots.append(cover_check(r, c, out, engine, k if keys[k] == 1 else f'{k}-{keys[k]}', tile_css))
+    return shots
+
+
 # —— 留存归因：掉人的那几秒，画面和声音里发生了什么 ——
 LAG = 1.0  # 看到问题到划走有反应时间：窗口往前多看 1 秒
 
@@ -1078,6 +1224,7 @@ FIX_HINTS = {
     'audio.sfx': '音效听不见：加音量，或者让开配乐的频段（同一时刻压一下配乐），或者挪开前一个音效',
     'mono': '外放会抵消：检查加宽效果、反相的音效或立体声混响，换成单声道兼容的版本',
     'spec': '上传规格：按 video_lint/specs.json 里推荐的编码、帧率、分辨率重新导出',
+    'cover.': '封面：最大的一句字放大到主页格子里至少 9 CSS 像素（3:4 封面约占高的 7%），要紧的字放在中间，字和背景拉开对比',
     'compare': '有新问题：这一版改动把别的东西改坏了，先看「新出现」那几项',
 }
 
@@ -1187,12 +1334,21 @@ def locate_checks(checks, sc, fps):
                 put(max(a, sh['from']), min(b, sh['to'] - 1), sh.get('source') or sh.get('defined') or cl, sh['name'], timing=sh.get('defined'))
             if not hit and not src and comp:
                 put(a, b, comp if isinstance(comp, dict) else {'file': comp})
+        # 封面问题指到封面组件：cover.3x4.feed → sources.covers['3x4']
+        covers = (sc.get('sources') or {}).get('covers') or {}
+        if c['id'].startswith('cover.') and (loc := covers.get(c['id'].split('.')[1].split('-')[0])):
+            w = {'from': 0, 'to': 0, 'file': loc['file'], 'line': loc.get('line'), 'count': 1, 'cover': True, 'what': loc.get('what', '封面组件')}
+            if root:
+                w['path'] = str(Path(root) / loc['file'])
+            found[(loc['file'], loc.get('line'), 'cover')] = w
         if found:
             c['where'] = list(found.values())[:8]
 
 
 def where_text(w, fps):
     loc = f'{w["file"]}:{w["line"]}' if w.get('line') else w['file']
+    if w.get('cover'):
+        return f'{loc}（{w.get("what", "封面组件")}）'
     span = f'第 {w["from"]} 帧' if w['from'] == w['to'] else f'第 {w["from"]}–{w["to"]} 帧'
     tm = w.get('timing')
     tm = f'；时间在 {tm["file"]}:{tm["line"]}' if tm and tm.get('line') else ''
@@ -1221,7 +1377,7 @@ def write_html(out, title, video, status, headline, checks, images, fps=30):
                     + (f'<div class="detail">{detail}</div>' if detail else '')
                     + ''.join(f'<div class="where">→ <code>{_html.escape(where_text(w, fps))}</code></div>' for w in c.get('where', [])) + '</details>')
     figs = _img_tag(images.get('frame0'), '第 0 帧（刷到时看到的）') + ''.join(_img_tag(p_, f'联系表 {i + 1}') for i, p_ in enumerate(images.get('sheets', [])))
-    figs += _img_tag(images.get('hits'), '爆点前后：−16 / −3 / −1 / +2 帧') + _img_tag(images.get('frames'), '指定帧') + _img_tag(images.get('curve'), '亮度和运动曲线')
+    figs += _img_tag(images.get('hits'), '爆点前后：−16 / −3 / −1 / +2 帧') + _img_tag(images.get('frames'), '指定帧') + _img_tag(images.get('curve'), '亮度和运动曲线') + ''.join(_img_tag(p_, '封面：裁切框和主页格子大小') for p_ in images.get('covers', []))
     counts = {k: sum(1 for c in checks if c['level'] == k) for k in order}
     filters = ''.join(f'<label><input type="checkbox" value="{k}" checked> {ICON[k]} {LEVEL_NAME[k]} {counts[k]}</label>' for k in order if counts[k])
     page = f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1309,10 +1465,47 @@ def apply_overrides(r, cfg):
                 break
 
 
+def cover_only(a):
+    """只查封面：不需要成片，报告格式和完整运行一样（report.md / .json / .html / fix.md）"""
+    out = Path(a.out) if a.out else Path(a.cover[0]).with_name(Path(a.cover[0]).stem + '-lint')
+    out.mkdir(parents=True, exist_ok=True)
+    r = Report()
+    images = {'covers': run_covers(r, a.cover, out, a.cover_tile)}
+    if a.compare:
+        compare_check(r, a.compare)
+    for c in r.checks:
+        if c['level'] in ('fail', 'warn') and (h := fix_hint(c['id'])):
+            c['fix'] = h
+    order = {'fail': 0, 'warn': 1, 'skip': 2, 'pass': 3, 'info': 4}
+    summary = {k: r.count(k) for k in order}
+    status = 'fail' if summary['fail'] else 'unmeasured' if summary['skip'] else 'pass'
+    headline = f'{summary["fail"]} 个问题、{summary["warn"]} 个提醒、{summary["pass"]} 项通过'
+    label = '、'.join(Path(c).name for c in a.cover)
+    md = [f'# video-lint 封面报告：{label}', '', f'**{headline}**', '']
+    for c in sorted(r.checks, key=lambda c: order[c['level']]):
+        md.append(f'- {ICON[c["level"]]} **{c["title"]}**')
+        if c['detail']:
+            md.append('  ' + c['detail'].replace('\n', '\n  '))
+        if c.get('fix'):
+            md.append(f'  - 改法：{c["fix"]}')
+    md += ['', '## 图', ''] + [f'- {p_}' for p_ in images['covers']]
+    (out / 'report.md').write_text('\n'.join(md), encoding='utf-8')
+    images['fix'] = str(write_fix(out, r.checks, label, 30))
+    images['html'] = str(write_html(out, f'video-lint 封面报告：{label}', label, status, headline, r.checks, images))
+    (out / 'report.json').write_text(json.dumps({'tool': 'video-lint', 'version': VERSION, 'video': None, 'covers': a.cover, 'status': status, 'summary': summary, 'checks': r.checks, 'images': images}, ensure_ascii=False, indent=1), encoding='utf-8')
+    print(f'{headline} → {out / "report.md"}')
+    for c in r.checks:
+        if c['level'] in ('fail', 'warn', 'skip'):
+            print(f'  {ICON[c["level"]]} {c["title"]}')
+    sys.exit(EXIT[status] if a.strict else 0)
+
+
 def main():
     ap = argparse.ArgumentParser(prog='video-lint', description='短视频成片质检 / deterministic QA for finished short videos')
     ap.add_argument('--version', action='version', version=f'video-lint {VERSION}')
-    ap.add_argument('video')
+    ap.add_argument('video', nargs='?', help='要查的成片；只查封面时可以不给')
+    ap.add_argument('--cover-tile', type=int, help='封面在列表里一格的宽度（CSS 像素）；默认竖封面 130（主页一行 3 格）、横封面 180')
+    ap.add_argument('--cover', action='append', help='封面图（可以给多次）：尺寸画幅、缩到主页格子里还读不读得出、居中裁切会不会切到字、文字对比度')
     ap.add_argument('--sidecar')
     ap.add_argument('--config', help=f'配置文件；不给就从视频所在目录往上找 {CONFIG_NAME}')
     ap.add_argument('--out')
@@ -1329,10 +1522,14 @@ def main():
     ap.add_argument('--text-failed', help='（run.mjs 用）文字层渲染失败的原因')
     ap.add_argument('--frames', help='另外抽这几帧拼成 frames.jpg（每行 4 格），看动画过程用：120,135=中段,150')
     a = ap.parse_args()
-    cfg_path = find_config(a.video, a.config)
+    if not a.video and not a.cover:
+        ap.error('要给成片，或者至少一个 --cover')
+    cfg_path = find_config(a.video or a.cover[0], a.config)
     cfg = load_config(cfg_path) if cfg_path else {}
     merge_config(a, cfg)
 
+    if not a.video:
+        return cover_only(a)
     video = Path(a.video)
     sc = json.loads(Path(a.sidecar).read_text(encoding='utf-8')) if a.sidecar else {}
     out = Path(a.out) if a.out else video.with_name(video.stem + '-lint')
@@ -1589,6 +1786,9 @@ def main():
                 'portrait': portrait, **open_feat, **open_events(events)}
     images['curve'] = str(out / 'curve.png')
 
+    if a.cover:
+        images['covers'] = run_covers(r, a.cover, out, a.cover_tile)
+
     # —— 和上一版比 ——
     if a.compare:
         compare_check(r, a.compare)
@@ -1615,7 +1815,7 @@ def main():
             md.append(f'  - → `{where_text(w, fps)}`')
         if c.get('fix'):
             md.append(f'  - 改法：{c["fix"]}')
-    md += ['', '## 图', '', f'- {images["frame0"]}（第 0 帧原尺寸，单独看：刷到时就是这一帧）'] + [f'- {p}' for p in sheets] + ([f'- {images["frames"]}（--frames 指定的帧）'] if 'frames' in images else []) +([f'- {images["hits"]}（每个爆点 −16 / −3 / −1 / +2 帧：应当是 收暗 → 静止 → 静止 → 亮起）'] if 'hits' in images else []) + [f'- {images["curve"]}', '',
+    md += ['', '## 图', '', f'- {images["frame0"]}（第 0 帧原尺寸，单独看：刷到时就是这一帧）'] + [f'- {p}' for p in sheets] + ([f'- {images["frames"]}（--frames 指定的帧）'] if 'frames' in images else []) +([f'- {images["hits"]}（每个爆点 −16 / −3 / −1 / +2 帧：应当是 收暗 → 静止 → 静止 → 亮起）'] if 'hits' in images else []) + [f'- {images["curve"]}'] + [f'- {c}（封面：黄框是居中裁切，青框是认出的字，右边是主页格子大小）' for c in images.get('covers', [])] + ['',
            '数值只是信号，最后的观感和听感要人确认。']
     (out / 'report.md').write_text('\n'.join(md), encoding='utf-8')
     images['fix'] = str(write_fix(out, r.checks, video, fps))

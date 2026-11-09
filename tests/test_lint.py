@@ -602,3 +602,72 @@ def test_attribution_lists_events_in_window(tmp_path):
     assert any(e['kind'] == 'light' and '暗' in e['text'] for e in valley['events'])
     assert r['features']['openEvents'] >= 3 and r['features']['firstCutSec'] == 1.5
     assert any(e[1] == 'cut' for e in r['events'])
+
+
+# —— 封面 ——
+
+def _cover(path, size, text_px, w=1080, h=1440, y=0.08):
+    from PIL import ImageDraw, ImageFont
+    im = Image.new('RGB', (w, h), (12, 12, 16))
+    d = ImageDraw.Draw(im)
+    try:
+        font = ImageFont.load_default(size=text_px)
+    except TypeError:  # Pillow < 10.1
+        pytest.skip('Pillow 太旧，没有可缩放的默认字体')
+    d.text((w * 0.08, h * y), 'GOOD MORNING', fill=(240, 220, 160), font=font)
+    im.save(path)
+    return path
+
+
+def test_cover_crops():
+    assert lint.cover_crops(3 / 4) == {'1:1': (0.0, 0.125, 1.0, 0.875)}
+    assert lint.cover_crops(4 / 3) == {'16:9': (0.0, 0.125, 1.0, 0.875)}  # 横封面裁成 16:9：上下各裁掉 12.5%
+
+
+def test_cover_only_without_ocr(tmp_path):
+    c = _cover(tmp_path / 'c.png', None, 120, w=1000, h=1000)
+    r = lint.Report()
+    lint.cover_check(r, c, tmp_path, None, '1x1')
+    by = {x['id']: x for x in r.checks}
+    assert by['cover.1x1.size']['level'] == 'pass'
+    assert by['cover.1x1.feed']['level'] == 'info'
+    assert (tmp_path / 'cover-1x1.jpg').exists()
+    small = Image.new('RGB', (600, 500))
+    small.save(tmp_path / 's.png')
+    r = lint.Report()
+    lint.cover_check(r, tmp_path / 's.png', tmp_path, None, 's')
+    assert r.checks[0]['level'] == 'warn'  # 6:5 不是常见画幅、短边不到 720
+
+
+@pytest.mark.skipif(lint.ocr_engine() is None, reason='没装 rapidocr-onnxruntime')
+@pytest.mark.parametrize('px,expect', [(130, 'pass'), (28, 'warn')])
+def test_cover_feed_legibility(tmp_path, px, expect):
+    c = _cover(tmp_path / 'c.png', None, px)
+    r = lint.Report()
+    lint.cover_check(r, c, tmp_path, lint.ocr_engine(), '3x4')
+    feed = next(x for x in r.checks if x['id'] == 'cover.3x4.feed')
+    assert feed['level'] == expect, feed['title']
+    crop = next(x for x in r.checks if x['id'] == 'cover.3x4.crop')
+    assert crop['level'] in ('info', 'pass')  # 裁切只记录，不提醒（平台怎么裁没有实测）
+    if expect == 'pass':
+        assert crop['level'] == 'info'  # 标题在顶部 8%：居中裁成 1:1 会被切掉
+
+
+def test_cover_cli_only_covers(tmp_path):
+    c = _cover(tmp_path / 'c.png', None, 120)
+    out = tmp_path / 'out'
+    p = subprocess.run([sys.executable, '-I', str(LINT), '--cover', str(c), '--out', str(out), '--strict'], capture_output=True, text=True, encoding='utf-8', errors='replace')
+    assert p.returncode == 0, p.stderr
+    rep = json.loads((out / 'report.json').read_text(encoding='utf-8'))
+    assert rep['video'] is None and rep['covers'] == [str(c)]
+    assert any(x['id'] == 'cover.3x4.size' for x in rep['checks'])
+    assert (out / 'report.html').exists() and (out / 'fix.md').exists()
+
+
+def test_cover_where_points_to_cover_component():
+    checks = [{'id': 'cover.4x3.feed', 'level': 'warn', 'title': '', 'detail': '', 'data': None}]
+    sc = {'sources': {'covers': {'4x3': {'file': 'src/Covers.tsx', 'line': 40, 'what': '封面组件 CoverWide'}}}}
+    lint.locate_checks(checks, sc, 30)
+    w = checks[0]['where'][0]
+    assert (w['file'], w['line'], w['cover']) == ('src/Covers.tsx', 40, True)
+    assert lint.where_text(w, 30) == 'src/Covers.tsx:40（封面组件 CoverWide）'

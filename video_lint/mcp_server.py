@@ -37,6 +37,7 @@ def lint_video(
     compare: str | None = None,
     ocr: bool = True,
     flash: bool = True,
+    covers: list[str] | None = None,
 ) -> dict:
     """Check a finished short video (mp4 / mov / mkv) before publishing: first frame and first two seconds,
     black / frozen stretches, flashing (WCAG 2.3.1), upload spec, text under platform UI zones, cut-on-beat,
@@ -53,6 +54,7 @@ def lint_video(
         compare: previous report.json (or its folder) to list fixed / new / remaining problems.
         ocr: find text with OCR when there is no text layer (needs the [ocr] extra).
         flash: run the flash safety check.
+        covers: cover image paths to check too (size, legibility at list-tile size, centre crops, contrast).
 
     Returns status (pass / fail / unmeasured), a one-line headline, every fail / warn / skip check with its
     detail, a `fix` hint and (when the sidecar carries source locations) `where`: source file:line, shot and frame range;
@@ -71,6 +73,8 @@ def lint_video(
         cmd.append('--no-ocr')
     if not flash:
         cmd.append('--no-flash')
+    for c in covers or []:
+        cmd += ['--cover', str(Path(c).expanduser().resolve())]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
     report = o / 'report.json'
     if p.returncode not in (0, 2, 3) or not report.exists():
