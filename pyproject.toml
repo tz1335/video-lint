@@ -21,14 +21,17 @@ classifiers = [
 [project.optional-dependencies]
 ocr = ["rapidocr-onnxruntime"]
 beats = ["librosa>=0.10"]
+glyphs = ["fonttools>=4.40"]
 mcp = ["mcp>=1.2"]
-all = ["rapidocr-onnxruntime", "librosa>=0.10", "mcp>=1.2"]
+all = ["rapidocr-onnxruntime", "librosa>=0.10", "fonttools>=4.40", "mcp>=1.2"]
 
 [project.scripts]
 video-lint = "video_lint.lint:main"
+video-lint-import = "video_lint.sidecar_import:main"
 video-lint-mcp = "video_lint.mcp_server:main"
 
 [project.urls]
+# 发布前换成真实仓库地址 / replace before publishing
 Homepage = "https://github.com/tz1335/video-lint"
 
 [tool.setuptools]

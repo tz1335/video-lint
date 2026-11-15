@@ -10,9 +10,12 @@ Checks a rendered video with fixed rules and writes a report you can act on. It 
 ## Run it
 
 ```bash
-pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.8.0"
+pipx install "video-lint[ocr] @ git+https://github.com/tz1335/video-lint@v0.9.0"
 video-lint final.mp4 --out lint-report
 video-lint final.mp4 --sidecar sidecar.json --platform tiktok --lufs -14 --strict
+# no sidecar yet: build one from the subtitles (and an EDL) the editor exported
+video-lint-import final.mp4 --srt final.srt [--edl final.edl] -o sidecar.json
+video-lint final.mp4 --sidecar sidecar.json --font Caption.ttf   # --font: missing-glyph check, needs fonttools
 # 不安装：pip install -r requirements.txt && python -I lint.py final.mp4
 ```
 
@@ -35,6 +38,8 @@ Exit code 1 means the script itself crashed. Each entry in `checks` is `{id, lev
 When fixing, change the source (composition, timeline, mix) and re-render; do not patch the mp4.
 
 ## Give it more context (optional)
+
+The quickest sidecar comes from `video-lint-import` (fps / size / duration from ffprobe, `captions` from SRT / VTT / ASS, `shots` from a CMX 3600 EDL). With captions the report also checks the closing question (`end.ask`: the last screen should be a question readable for ≥ 2 s). Where each threshold comes from: `THRESHOLDS.md`.
 
 A sidecar JSON unlocks the timing checks. Times are in **frames**, the beat grid in **seconds**:
 

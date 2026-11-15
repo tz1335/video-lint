@@ -11,7 +11,7 @@
   hits.jpg     每个爆点前后几帧
   curve.png    整片亮度和运动曲线，标了镜头、爆点、硬切
 
-旁注格式见同目录 README.md；这一工程里用 node scripts/video-lint/run.mjs <作品ID> 自动生成旁注并调用本脚本。
+旁注格式见 README.md；没有旁注时可以用 video-lint-import 从 SRT / EDL 生成。
 """
 import argparse
 import base64
@@ -30,7 +30,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = '0.8.0'
+VERSION = '0.9.0'
 # 「要听得见」的音效：冲击、动作音；whoosh、swish、paper、room 这类本来就轻，不查
 LOUD_DEFAULT = ['impact', 'press', 'drop', 'chime', 'bell', 'clink', 'stamp', 'coin', 'tick', 'gunshot', 'crack', 'chapter', 'footstep', 'bloom']
 ZONES_FILE = Path(__file__).with_name('zones.json')
@@ -47,7 +47,7 @@ def platform_zones(platform):
     return {'name': p['name'], 'updated': p.get('updated'), 'zones': [(z['label'], *rect(z)) for z in p['zones']], 'safe': rect(p['safe'])}
 # 一帧里 99.5% 分位亮度低于它，就算黑屏（0–255）。暗底风格的背景光晕本身就有 35–40，所以压到 24
 BLACK_P995 = 24
-# 「几乎不动」的帧差上限：h264 编码噪声在 0.01 上下；连线星图风缓慢漂移的粒子在 0.03–0.1，不能算静止
+# 「几乎不动」的帧差上限：h264 编码噪声在 0.01 上下；慢漂移粒子类画面缓慢漂移的粒子在 0.03–0.1，不能算静止
 STATIC_DIFF = 0.025
 # skip = 该查但查不了（没音轨、爆点不在片内、有硬切但没拍子网格）。整体状态：有 fail 是 fail，否则有 skip 是 unmeasured，否则 pass
 ICON = {'fail': '✗', 'warn': '⚠', 'skip': '?', 'pass': '✓', 'info': '·'}
@@ -60,7 +60,7 @@ def run(args, text=False):
 
 
 def font(size):
-    for path in (ROOT / 'public/fonts/ZCOOLKuaiLe-Regular.ttf', 'C:/Windows/Fonts/msyh.ttc', '/System/Library/Fonts/PingFang.ttc', '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'):
+    for path in ('C:/Windows/Fonts/msyh.ttc', '/System/Library/Fonts/PingFang.ttc', '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'):
         try:
             return ImageFont.truetype(str(path), size)
         except OSError:
@@ -111,14 +111,18 @@ def frame_series(video, w, h):
 def extract_frames(video, frames, tile_w, out_dir):
     """一次解码抽出若干帧（按帧号升序），缩到 tile_w 宽"""
     frames = sorted(set(frames))
-    sel = '+'.join(f'eq(n,{f})' for f in frames)
-    for old in out_dir.glob('_f*.png'):
-        old.unlink()
-    run(['ffmpeg', '-v', 'error', '-y', '-i', str(video), '-vf', f"select='{sel}',scale={tile_w}:-2", '-fps_mode', 'passthrough', str(out_dir / '_f%04d.png')])
-    files = sorted(out_dir.glob('_f*.png'))
-    ims = {f: Image.open(p).convert('RGB') for f, p in zip(frames, files)}
-    for p in files:
-        p.unlink()
+    ims = {}
+    # ffmpeg 的表达式一长串 eq(n,…)+… 嵌套过深会解析失败（约 100 项，报 Cannot allocate memory），分批抽
+    for k in range(0, len(frames), 60):
+        part = frames[k:k + 60]
+        sel = '+'.join(f'eq(n,{f})' for f in part)
+        for old in out_dir.glob('_f*.png'):
+            old.unlink()
+        run(['ffmpeg', '-v', 'error', '-y', '-i', str(video), '-vf', f"select='{sel}',scale={tile_w}:-2", '-fps_mode', 'passthrough', str(out_dir / '_f%04d.png')])
+        files = sorted(out_dir.glob('_f*.png'))
+        ims.update({f: Image.open(p).convert('RGB') for f, p in zip(part, files)})
+        for p in files:
+            p.unlink()
     return ims
 
 
@@ -162,7 +166,7 @@ def text_boxes(text_dir, video, out):
     return boxes
 
 
-OCR_SHRINK = 0.74  # OCR 检测框比字形高一截（文字检测会把框往外扩），按中心收到约字高，和文字层的量法对齐（ep53 上 67 行对照：OCR 框高中位数是字高的 1.36 倍）
+OCR_SHRINK = 0.74  # OCR 检测框比字形高一截（文字检测会把框往外扩），按中心收到约字高，和文字层的量法对齐（样片 上 67 行对照：OCR 框高中位数是字高的 1.36 倍）
 
 
 def ocr_engine():
@@ -197,7 +201,7 @@ def ocr_boxes(engine, video, frames, out, max_w=960):
 
 def merge_lines(found, aspect=1.0):
     """同一行的几块合成一个行框：纵向重叠超过较矮那块的一半，而且横向离得不远（空隙不超过两个字高）。
-    字间距大的时候一行会被拆成几段，要拼回来；但同一高度、隔着半个画面的两个标签（ep53 圆环左右的「18 点」「6 点」）不能连成一条。
+    字间距大的时候一行会被拆成几段，要拼回来；但同一高度、隔着半个画面的两个标签（样片 圆环左右的「18 点」「6 点」）不能连成一条。
     aspect = 画面宽 / 高，用来把横向空隙换成字高的倍数。"""
     lines = []
     for b in sorted(found, key=lambda b: (b[0], b[1])):
@@ -211,6 +215,100 @@ def merge_lines(found, aspect=1.0):
         else:
             lines.append(list(b))
     return sorted(lines, key=lambda b: (b[1], b[0]))
+
+
+# —— 片尾评论问题 ——
+# 作者两种卡配乐的风格都是「片尾停在评论区问题」：评论数是推荐的信号，问句要是最后一句、停够久、不被收尾的黑场盖住。
+END_ASK_SEC = 2.0  # 一句 10 字左右的问题，读完再想一下要打什么字；和阅读速度（每秒 ≤ 9 字）同一个量级
+ASK_RE = re.compile(r'[？?][」』”"）)\s]*$|[吗呢么吧][。！!…~～\s]*$|评论区|你会选|你选|你呢|你觉得|哪|什么|谁|怎么|多少|几[个次年天岁]')
+
+
+def end_ask(r, sc, mean, p995, fps, n):
+    """mean / p995 为 None = 前置检查（还没有成片）：只按字幕时长算，黑场和淡出压暗要成片才知道"""
+    caps = [c for c in sc.get('captions') or [] if c.get('text', '').strip()]
+    if not caps:
+        r.add('end.ask', 'info', '没有字幕表，片尾问句没查', '旁注里没有字幕（图表、卡牌这类把字画进画面的风格）；要查就传 --captions')
+        return {}
+    caps = sorted(caps, key=lambda c: c['from'])
+    tail = [c for c in caps[-3:] if c['from'] >= n - 12 * fps] or caps[-1:]
+    q = next((c for c in reversed(tail) if ASK_RE.search(c['text'].split(' / ')[0].strip())), None)
+    if q is None:
+        last = caps[-1]
+        r.add('end.ask', 'warn', f'片尾没有问句：最后一句是「{last["text"].split(" / ")[0][:24]}」',
+              '最后 3 句里没有问号或「吗 / 呢 / 你会选」这类问法；评论数是推荐信号，片尾停在一个观众能一句话回答的问题上',
+              {'from': last['from'], 'to': min(last['to'], n) - 1, 'source': last.get('source'), 'endAskSec': 0})
+        return {'endAskSec': 0}
+    a, b = q['from'], max(q['from'] + 1, min(q['to'], n))
+    if mean is None:
+        seen = range(a, b)
+        pre = '（前置检查只按字幕时长算；黑场、淡出压暗要成片才知道）'
+    else:
+        ref = float(np.median(mean[a:min(b, a + max(1, int(0.5 * fps)))]))
+        # 有画面 = 不是黑帧，而且没暗到问句刚出来时的一半（淡出收尾的后半段读不清）
+        seen = [i for i in range(a, b) if p995[i] >= BLACK_P995 and mean[i] >= 0.5 * ref]
+        pre = ''
+    sec = len(seen) / fps
+    text = q['text'].split(' / ')[0][:24]
+    after = [c for c in caps if c['from'] > q['from']]
+    d = {'from': a, 'to': b - 1, 'source': q.get('source'), 'endAskSec': round(sec, 2)}
+    if sec < END_ASK_SEC:
+        dark = (b - a) / fps - sec
+        r.add('end.ask', 'warn', f'片尾问句只看得清 {sec:.1f} 秒（标准 ≥ {END_ASK_SEC:.0f} 秒）：「{text}」',
+              f'字幕 {a / fps:.2f}–{b / fps:.2f} 秒' + (f'，其中 {dark:.1f} 秒被黑场或淡出压暗' if dark >= 0.1 else '') + ('，成片在字幕结束前就完了' if q['to'] > n else '') + pre, d)
+    elif after:
+        r.add('end.ask', 'info', f'问句后面还有 {len(after)} 句：「{text}」之后是「{after[-1]["text"].split(" / ")[0][:20]}」',
+              f'问句停 {sec:.1f} 秒；最后一屏不是问题，评论的冲动会被后面的话冲淡' + pre, d)
+    else:
+        r.add('end.ask', 'pass', f'片尾停在问句上，看得清 {sec:.1f} 秒：「{text}」', pre, d)
+    return {'endAskSec': round(sec, 2)}
+
+
+def glyph_check(r, g):
+    """glyphs.py 的结果：源码里写的字在这一期加载的字体里有没有（没有的会悄悄换成系统字体）"""
+    fonts = '、'.join(Path(f).name for f in g.get('fonts', []))
+    if g.get('status') == 'skip':
+        r.add('text.glyphs', 'skip', '缺字没法静态查', g.get('reason', ''))
+        return
+    miss = g.get('missing') or []
+    if not miss:
+        r.add('text.glyphs', 'pass', '源码里的字字体里都有', f'字体：{fonts}')
+        return
+    chars = ' '.join(m['char'] for m in miss)
+    lines = [f'  - {m["char"]} {m["code"]}：' + '，'.join(f'{w["file"]}:{w["line"]}' for w in m['where'][:3]) + (f' 等 {len(m["where"])} 处' if len(m['where']) > 3 else '') for m in miss]
+    if g.get('status') == 'info':
+        r.add('text.glyphs', 'info', f'{len(miss)} 个字仓库字体里没有（这一期还用系统字体，可能由它画）：{chars[:40]}', f'字体：{fonts}' + chr(10) + chr(10).join(lines))
+        return
+    r.add('text.glyphs', 'warn', f'{len(miss)} 个字字体里没有，会换成系统字体：{chars[:40]}', f'字体：{fonts}' + chr(10) + chr(10).join(lines), {'missing': miss})
+
+
+_GLYPH_SKIP = set(range(0xFE00, 0xFE10)) | {0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00A0, 0x3000, 0x2009, 0x200A, 0x202F}
+
+
+def caption_glyphs(caps, fonts, label='captions'):
+    """不依赖工程结构的缺字检查：字幕里的字在给定字体（--font，可以给多个）里有没有，结果和 glyphs.py 同一格式交给 glyph_check。
+    需要 fontTools（pip install fonttools）；字体读不了或没装就返回 skip。"""
+    try:
+        from fontTools.ttLib import TTFont
+    except ImportError:
+        return {'status': 'skip', 'reason': '缺字检查要装 fonttools：pip install fonttools'}
+    cmap, used = set(), []
+    for f in fonts:
+        try:
+            cmap |= set(TTFont(str(f), lazy=True, fontNumber=0).getBestCmap() or {})
+            used.append(str(f))
+        except Exception as e:  # noqa: BLE001 —— 字体坏了 / 格式不认也只是这一项查不了
+            return {'status': 'skip', 'reason': f'读不了字体 {Path(f).name}：{e}'}
+    missing = {}
+    for i, c in enumerate(caps, 1):
+        for ch in c.get('text', ''):
+            cp = ord(ch)
+            if cp < 0x80 or cp in _GLYPH_SKIP or ch.isspace() or cp in cmap:
+                continue
+            m = missing.setdefault(ch, {'char': ch, 'code': f'U+{cp:04X}', 'count': 0, 'where': []})
+            m['count'] += 1
+            if not any(w['line'] == i for w in m['where']):
+                m['where'].append({'file': label, 'line': i})
+    return {'status': 'fail' if missing else 'pass', 'fonts': used, 'missing': sorted(missing.values(), key=lambda m: m['where'][0]['line'])}
 
 
 def text_checks(r, boxes, zones, sc, fps, aspect, source='文字层（Remotion 渲的品红文字）'):
@@ -258,13 +356,35 @@ def text_checks(r, boxes, zones, sc, fps, aspect, source='文字层（Remotion �
 
 # 阿拉伯数字；或者中文数字带量词。单独的「一」不算（「一个人」「一句话」不是数字），「一百」「一千」才算
 NUM_RE = re.compile(r'[0-9０-９]|(?:[两三四五六七八九十]|一[百千万亿])[一二两三四五六七八九十百千万亿]*\s*(?:年|岁|人|个|倍|成|万|亿|%|分钟|小时|天|次|份|位)')
-# 规则出处：在原工程里指向那份复盘笔记；单独发布时笔记不在，就只写规则名
-_RULES_DOC = 'materials/00-公共/选题脚本/00-爆款结构-抖腿.md'
-RULES = f'{_RULES_DOC}「前 2 秒」' if (ROOT / _RULES_DOC).exists() else '「前 2 秒」规则'
+RULES = '「前 2 秒」规则'
+
+
+def caption_open_rules(sc, fps):
+    """开头规则里只看字幕表就能判的两条：规则 2 的「第一句 ≤ 10 字」、规则 5「8 秒内出数字」。
+    成片检查和前置检查（--pre）共用，返回 (规则号, 级别, 标题, 说明)"""
+    rows = []
+    caps = sc.get('captions') or []
+    first_cap = caps[0] if caps else None
+    if first_cap and first_cap['from'] <= fps:
+        zh = first_cap['text'].split(' / ')[0]
+        plain = re.sub(r'[〔〕〖〗【】\s，。？！、,.?!—…「」]', '', zh)
+        rows.append((2, 'warn' if len(plain) > 10 else 'pass', f'第一句「{zh}」{len(plain)} 个字' + ('，超过 10 个' if len(plain) > 10 else ''), '标准：≤ 10 个字，0.5 秒读得完'))
+    # 5. 8 秒内出一个带人数或年份的数字
+    if caps:
+        hit = next((c for c in caps if c['from'] < 8 * fps and NUM_RE.search(c['text'].split(' / ')[0])), None)
+        rows.append((5, 'pass' if hit else 'warn', f'8 秒内出了数字：「{hit["text"].split(" / ")[0]}」（{hit["from"] / fps:.1f} 秒）' if hit else '8 秒内的字幕里没有数字', '标准：8 秒内出一个带人数或年份的数字'))
+    else:
+        rows.append((5, 'info', '没有字幕表，8 秒内有没有数字没法查', '画面里的数字（比如图表里的年龄）读不到'))
+    return rows
+
+
+def add_open_rows(r, rows):
+    for k, lv, title, detail in rows:
+        r.add(f'open.rule{k}', lv, f'开头规则 {k}：{title}', f'{detail}（{RULES}第 {k} 条）')
 
 
 def opening_rules(r, sc, boxes, bright, fps, n, P, from_ocr=False):
-    """「前 2 秒」硬规则里能机器判断的几条（来自 ep52 的教训，见 RULES）。字的大小按「字高 ÷ 视频宽」算：
+    """「前 2 秒」硬规则里能机器判断的几条（来自 样片 的教训，见 RULES）。字的大小按「字高 ÷ 视频宽」算：
     手机上横竖屏的视频都是撑满屏宽，这样两种画幅能放在一起比。"""
     W, H = P['width'], P['height']
     portrait = H > W
@@ -294,15 +414,11 @@ def opening_rules(r, sc, boxes, bright, fps, n, P, from_ocr=False):
             grow = (big[2] - big[0]) / max(b[2] - b[0] for b in same) if same else 1.0
             lv = 'fail' if size(big) < 0.025 else 'warn' if size(big) < 0.04 or grow < 0.8 else 'pass'
             rows.append((2, lv, f'第 0 帧最大的字：字高是视频宽的 {size(big):.1%}' + ('，这一行到 1 秒还在变长（逐字出现）' if grow < 0.8 else ''),
-                         '标准：≥ 4% 能一眼读（1080 宽约 43 像素，手机上约 16 号字）；< 2.5% 基本读不出。ep54 的第 0 帧是一堆手机聊天小字，2 秒跳出 51.5%'))
+                         '标准：≥ 4% 能一眼读（1080 宽约 43 像素，手机上约 16 号字）；< 2.5% 基本读不出。样片 的第 0 帧是一堆手机聊天小字，2 秒跳出 51.5%'))
     else:
-        rows.append((2, 'info', '没有文字层，第 0 帧的字没法量', '传 --text-dir（所有文字渲成纯品红的同帧 PNG）才能量；原工程里 run.mjs 会自动渲'))
-    caps = sc.get('captions') or []
-    first_cap = caps[0] if caps else None
-    if first_cap and first_cap['from'] <= fps:
-        zh = first_cap['text'].split(' / ')[0]
-        plain = re.sub(r'[〔〕〖〗【】\s，。？！、,.?!—…「」]', '', zh)
-        rows.append((2, 'warn' if len(plain) > 10 else 'pass', f'第一句「{zh}」{len(plain)} 个字' + ('，超过 10 个' if len(plain) > 10 else ''), '标准：≤ 10 个字，0.5 秒读得完'))
+        rows.append((2, 'info', '没有文字层，第 0 帧的字没法量', '传 --text-dir（所有文字渲成纯品红的同帧 PNG）才能量；Remotion 适配器会自动渲'))
+    cap_rows = caption_open_rules(sc, fps)
+    rows += [x for x in cap_rows if x[0] == 2]
 
     # 4. 竖屏冷开场：上半屏第 0 帧起常驻一句钩子（还要躲开顶栏，那由 text.zones 判）
     if portrait and boxes:
@@ -310,19 +426,54 @@ def opening_rules(r, sc, boxes, bright, fps, n, P, from_ocr=False):
         top = [f for f in early if any((b[1] + b[3]) / 2 < 0.45 for b in boxes[f])]
         lv = 'pass' if len(top) == len(early) else 'warn'
         rows.append((4, lv, '上半屏有常驻钩子' if lv == 'pass' else f'前 2 秒上半屏只有 {len(top)} / {len(early)} 帧有字', '标准：竖屏冷开场第 0 帧起，上半屏挂一句第二人称的问题，挂到标题卡前（放在顶栏 8% 以下）'))
-
-    # 5. 8 秒内出一个带人数或年份的数字
-    if caps:
-        hit = next((c for c in caps if c['from'] < 8 * fps and NUM_RE.search(c['text'].split(' / ')[0])), None)
-        rows.append((5, 'pass' if hit else 'warn', f'8 秒内出了数字：「{hit["text"].split(" / ")[0]}」（{hit["from"] / fps:.1f} 秒）' if hit else '8 秒内的字幕里没有数字', '标准：8 秒内出一个带人数或年份的数字'))
-    else:
-        rows.append((5, 'info', '没有字幕表，8 秒内有没有数字没法查', '画面里的数字（比如人生曲线的年龄）读不到'))
-
-    for k, lv, title, detail in rows:
-        r.add(f'open.rule{k}', lv, f'开头规则 {k}：{title}', f'{detail}（{RULES}第 {k} 条）')
+    rows += [x for x in cap_rows if x[0] == 5]
+    add_open_rows(r, rows)
     r.add('open.manual', 'info', '开头规则 3、6 要人看', f'3：第一句是断言或悬念、带利害，不是场景；6：单独看 frame0.jpg，在信息流里能不能看懂这期讲什么（{RULES}）')
     return {'frame0MaxText': round(max(((b[3] - b[1]) * H / W for b in boxes.get(0, [])), default=0), 4) if boxes else None,
-            'openRuleFails': sum(1 for _, lv, _, _ in rows if lv == 'fail'), 'openRuleWarns': sum(1 for _, lv, _, _ in rows if lv == 'warn')}
+            'openRuleFails': sum(1 for _, lv, _, _ in rows if lv == 'fail'), 'openRuleWarns': sum(1 for _, lv, _, _ in rows if lv == 'warn'),
+            **open_reading(r, boxes, fps, P)}
+
+
+OPEN_READ_RATE = 9   # 字 / 秒，和 captions.speed 同一个标准（Netflix 中文字幕上限）
+WALL = 3             # 超过 2 秒阅读量的 3 倍才报 ⚠：来自 8 期校准，只有 样片 的 88 字明显拖高了跳出
+READABLE = 0.025     # 字高 ÷ 视频宽低于这个（规则 2 的「基本读不出」）当装饰，不算要读的字：图表里的年份刻度只有 0.9%
+
+
+def line_chars(b, W, H):
+    """中文字形基本是方的：行宽 ÷ 字高 ≈ 字数（字间距大时会多估一两个，英文会多估）"""
+    return max(1, round((b[2] - b[0]) * W / max((b[3] - b[1]) * H, 1e-6)))
+
+
+def open_reading(r, boxes, fps, P):
+    """开头规则 7：前 2 秒屏上的字读不读得完。不需要字幕表，按文字层的行框估字数，
+    所以图表、卡牌这类字写在画面里的风格也能查。最初想连「台词比标签小」（样片）一起判，
+    8 期校准后撤了：句子字高和跳出没对上（ρ 反向），只留作特征。"""
+    W, H = P['width'], P['height']
+    early = [f for f in sorted(boxes) if f < 2 * fps and boxes[f]] if boxes else []
+    if not early:
+        return {'openTextChars': None, 'openLongLineChars': None, 'openLongLineSize': None}
+    size = lambda b: (b[3] - b[1]) * H / W
+    read = {f: [b for b in boxes[f] if size(b) >= READABLE] for f in early}
+    lines = [b for f in early for b in read[f]]
+    if not lines:
+        r.add('open.read', 'info', '开头规则 7：前 2 秒没有够大的字', f'只有字高 < {READABLE:.1%} 的小字，当装饰不算；第 0 帧没有大字由规则 2 判')
+        return {'openTextChars': 0, 'openLongLineChars': None, 'openLongLineSize': None}
+    most = max(sum(line_chars(b, W, H) for b in read[f]) for f in early)
+    longest = max(lines, key=lambda b: line_chars(b, W, H))
+    n_long, s_long, s_max = line_chars(longest, W, H), size(longest), max(size(b) for b in lines)
+    budget = int(2 * OPEN_READ_RATE)
+    wall = WALL * budget
+    lv = 'warn' if most > wall else 'info' if most > budget else 'pass'
+    head = (f'开头规则 7：前 2 秒同屏最多约 {most} 个字，是 2 秒阅读量（{budget} 字）的 {most / budget:.1f} 倍，基本是一墙字' if lv == 'warn' else
+            f'开头规则 7：前 2 秒同屏最多约 {most} 个字，超过 2 秒阅读量（{budget} 字），只记录' if lv == 'info' else
+            f'开头规则 7：前 2 秒同屏最多约 {most} 个字，2 秒读得完')
+    r.add('open.read', lv, head,
+          f'字数按行框估（行宽 ÷ 字高），英文和字间距大的字会多估；字高 < {READABLE:.1%} 的小字当装饰不算。'
+          f'2 秒阅读量按每秒 {OPEN_READ_RATE} 字（同 captions.speed）。超过 {wall} 字（{WALL} 倍）才报 ⚠：'
+          f'8 期里 7 期都超过 {budget} 字，包括 2 秒跳出最低的 样片（35 字），只有 样片（88 字）明显更差（跳出 51.5%）。'
+          f'最长一行约 {n_long} 字、字高 {s_long:.1%}，只记录：8 期里句子字大不大和跳出没有对上',
+          {'chars': int(most), 'longChars': int(n_long), 'longSize': round(float(s_long), 4), 'maxSize': round(float(s_max), 4)})
+    return {'openTextChars': int(most), 'openLongLineChars': int(n_long), 'openLongLineSize': round(float(s_long), 4)}
 
 
 def label(im, text, zones=None, boxes=None):
@@ -383,6 +534,25 @@ def hard_cuts(diff):
         if diff[n] > 18 and diff[n] > 3 * base + 2 and diff[n] > 1.8 * max(prev, nxt):
             cuts.append(n)
     return cuts
+
+
+def cuts_on_beats(r, cuts, beats, grid_src, fps, shots, what='硬切', note=''):
+    """硬切（或前置检查里的镜头起点）离最近拍点多远；成片检查和 --pre 共用"""
+    bt = np.array(beats)
+    period = float(np.median(np.diff(bt))) if len(bt) > 1 else 0.5
+    rows, off = [], []
+    for c in cuts:
+        t = c / fps
+        o = (t - bt[np.abs(bt - t).argmin()]) * fps
+        half = abs(((t - bt[0]) / (period / 2)) - round((t - bt[0]) / (period / 2))) * (period / 2) * fps
+        if abs(o) > 1.5:
+            off.append(c)
+            rows.append(f'第 {c} 帧（{t:.2f} 秒，{shot_at(shots, c) or "—"}）偏 {o:+.1f} 帧' + ('，落在半拍上' if half <= 1.5 else ''))
+    level = 'pass' if not off else 'warn' if len(off) <= max(2, len(cuts) // 4) else 'fail'
+    if level == 'fail' and grid_src.startswith('由音频估计'):
+        level = 'warn'  # 音频估的网格拍长有误差，越往后漂得越多（样片：估成 0.464 秒，实际 0.4525），不够判 ✗
+    r.add('beats.cuts', level, f'{what}卡拍：{len(cuts) - len(off)} / {len(cuts)} 处在拍点 ±1.5 帧内',
+          f'拍子来源：{grid_src}，拍长 {period:.3f} 秒。{note}' + ('不在拍上的：\n' + '\n'.join(f'  - {x}' for x in rows) if rows else ''), {'cuts': cuts, 'offBeat': off})
 
 
 def shot_at(shots, f):
@@ -519,7 +689,7 @@ def spec_check(r, video, platform):
         issues.append(f'画幅 {_ratio(w, h)}，{p["name"]}信息流主要是 {" / ".join(p["aspects"])}，会加黑边或被裁')
     hints = []
     if rate and min(w, h) >= 1080 and rate < c['minBitrate1080p']:
-        # 只提示不报警：按质量（CRF）导出时，暗底、静止多的片子码率本来就低，画质并不差（ep52 1.3 Mbps、ep53 1.8 Mbps 都是这样）
+        # 只提示不报警：按质量（CRF）导出时，暗底、静止多的片子码率本来就低，画质并不差（样片 1.3 Mbps、样片 1.8 Mbps 都是这样）
         hints.append(f'码率 {rate / 1e6:.1f} Mbps，低于 1080p 常见的 {c["minBitrate1080p"] / 1e6:.1f} Mbps：画面细节多的话平台再压一次可能偏糊；暗底、静止多的片子码率本来就低，可以不管')
     if p['maxSeconds'] and dur > p['maxSeconds']:
         issues.append(f'时长 {dur:.1f} 秒，超过{p["name"]}的 {p["maxSeconds"]} 秒上限')
@@ -628,7 +798,7 @@ def sfx_stem_check(r, sc, y, sr, stem, fps, loud, out_dir=None):
     成片 = g × 音效分轨 + 配乐（+ 人声）：g 用整条音轨的最小二乘估（分轨可能单独做过响度标准化，成片可能限过幅），
     配乐 = 成片 − g × 音效分轨。每个音效取它开始后 0.2 秒，全频和 1.2–5 kHz 各算一次。"""
     s, _ = audio_mono(stem)
-    # 两次导出的 AAC 编码起点可能差几毫秒（ep60 差 5 毫秒），先在 ±0.1 秒里找互相关最大的偏移对齐
+    # 两次导出的 AAC 编码起点可能差几毫秒（样片 差 5 毫秒），先在 ±0.1 秒里找互相关最大的偏移对齐
     k = min(len(y), len(s), 30 * sr)
     cc = np.fft.irfft(np.fft.rfft(y[:k], 2 * k) * np.conj(np.fft.rfft(s[:k], 2 * k)))
     L = int(0.1 * sr)
@@ -652,7 +822,9 @@ def sfx_stem_check(r, sc, y, sr, stem, fps, loud, out_dir=None):
             continue
         smr = db(g * ss[w]) - db(music[w])
         smr_hi = band_db(g * ss[w], sr) - band_db(music[w], sr)
-        rows.append({'name': e['name'], 'frame': e['frame'], 'smr': round(smr, 1), 'smrHi': round(smr_hi, 1)})
+        # 要听得清（较好的一边 ≥ −3 dB）还差多少：音效整体加 x dB，两个频段的 SMR 都正好加 x dB
+        need = max(0.0, round(SFX_CLEAR_DB - max(smr, smr_hi), 1))
+        rows.append({'name': e['name'], 'frame': e['frame'], 'smr': round(smr, 1), 'smrHi': round(smr_hi, 1), 'needDb': need, 'volume': e.get('volume')})
     if not rows:
         r.add('audio.sfx', 'info', '音效分轨里旁注的音效位置都没有声音', '')
         return
@@ -670,12 +842,36 @@ def sfx_stem_check(r, sc, y, sr, stem, fps, loud, out_dir=None):
             wv.setsampwidth(2)
             wv.setframerate(sr)
             wv.writeframes((np.clip(clips, -1, 1) * 32767).astype(np.int16).tobytes())
-    fmt = lambda x: f'  - {x["name"]} @ {x["frame"] / fps:.2f} 秒：全频 {x["smr"]:+.1f} dB，1.2–5 kHz {x["smrHi"]:+.1f} dB'
+    fmt = lambda x: f'  - {x["name"]} @ {x["frame"] / fps:.2f} 秒：全频 {x["smr"]:+.1f} dB，1.2–5 kHz {x["smrHi"]:+.1f} dB' + (f'，要 +{x["needDb"]:.1f} dB' if x['needDb'] > 0 else '')
+    plan = sfx_gain_plan(lost)
     r.add('audio.sfx', lv, f'音效压不压得过配乐（用分轨算）：{len(clear)} / {len(rows)} 处听得清，{len(lost)} 处几乎听不见',
           f'分轨 {Path(stem).name}，对齐偏移 {lag / sr * 1000:+.1f} 毫秒，成片里音效的增益 g = {g:.3f}。数字是音效比配乐高多少 dB：全频和 1.2–5 kHz 都低于 −10 dB 算几乎听不见，有一边 ≥ −3 dB 算听得清'
           + ('\n几乎听不见的（加音量，或者给它让出频段）：\n' + '\n'.join(fmt(x) for x in lost)
+             + ('\n每种音效要加多少（按这一种里最差的那处，加完正好到 −3 dB）：\n' + '\n'.join('  - ' + x for x in plan))
              + (f'\n前 {min(12, len(lost))} 处剪成了 {Path(out_dir) / "sfx-lost.wav"}（每段从音效前 0.5 秒到后 1 秒），听一遍确认阈值准不准' if out_dir else '') if lost else '')
-          + '\n全部：\n' + '\n'.join(fmt(x) for x in rows[:60]), {'gain': g, 'events': rows})
+          + '\n全部：\n' + '\n'.join(fmt(x) for x in rows[:60]), {'gain': g, 'events': rows, 'fixPlan': plan})
+
+
+SFX_CLEAR_DB = -3.0
+
+
+def sfx_gain_plan(lost):
+    # 几乎听不见的音效按名字归组：每种要加多少 dB（取最差那处）、换成音量倍数是多少
+    by = {}
+    for x in lost:
+        by.setdefault(x['name'], []).append(x)
+    out, no_vol = [], False
+    for name, xs in sorted(by.items(), key=lambda kv: -max(x['needDb'] for x in kv[1])):
+        need = max(x['needDb'] for x in xs)
+        k = 10 ** (need / 20)
+        vol = next((x['volume'] for x in xs if x.get('volume') is not None), None)
+        how = f'音量 {vol:g} → {vol * k:.2g}' if vol is not None else f'音量 ×{k:.1f}'
+        no_vol = no_vol or vol is None
+        tip = '（超过 20 dB 光加音量不现实：先把同一时刻的配乐压下去，或者换高频更多的音效）' if need > 20 else ''
+        out.append(f'{name}（{len(xs)} 处）：+{need:.1f} dB，{how}{tip}')
+    if no_vol:
+        out.append('旁注里没有音量的：在音效表里加音量列，或者在音效合成脚本里把这个音效整体调高')
+    return out
 
 
 def draw_curve(mean, diff, fps, sc, cuts, out):
@@ -731,7 +927,7 @@ def retention_points(perf, duration_sec):
         pts.setdefault(2.0, 1 - perf['bounce2s'])
     if perf.get('retention5s') is not None:
         pts.setdefault(5.0, perf['retention5s'])
-    # 片尾以完播率为准：从「观看趋势」图上目测的片尾点会偏高（ep58 图上 20 秒约 12%，完播率是 5.73%），
+    # 片尾以完播率为准：从「观看趋势」图上目测的片尾点会偏高（样片 图上 20 秒约 12%，完播率是 5.73%），
     # 所以完播率总是接在片尾，并去掉片长最后 10% 里手抄的点
     if perf.get('completion') is not None and duration_sec:
         pts = {t: v for t, v in pts.items() if t < 0.9 * duration_sec}
@@ -825,7 +1021,7 @@ def cover_check(r, path, out, engine, key, tile_css=None):
         lines = []
     else:
         big = im if max(W, H) <= 1600 else im.resize((round(W * 1600 / max(W, H)), round(H * 1600 / max(W, H))), Image.LANCZOS)
-        # 封面要拿认出的字下结论，比视频帧要求严：置信度 ≥ 0.8（ep58 封面上卡牌花纹被认成「大式式国」，置信度 0.58）
+        # 封面要拿认出的字下结论，比视频帧要求严：置信度 ≥ 0.8（样片 封面上卡牌花纹被认成「大式式国」，置信度 0.58）
         lines = [x for x in ocr_lines(engine, big) if len(_norm_text(x[1])) >= 2 and x[2] >= 0.8]
         small_txt = [_norm_text(t) for _, t, _ in ocr_lines(engine, thumb.resize((thumb.width * 2, thumb.height * 2), Image.LANCZOS))]
         rows, lost, title = [], [], None
@@ -1006,7 +1202,7 @@ def attribution_check(r, perf, events, fps, n):
         return
     r.add('retention.why', 'info', f'掉人的 {len(data)} 个时间窗里发生了什么',
           '把留存掉得多的时间窗（开头 2 秒、后台低谷、跳出峰、比同类掉得多的段）对上同一时刻的画面和声音事件；人看到问题到划走有反应时间，所以每个窗口往前多看 1 秒。'
-          '只列事件不下结论：哪一个是原因要人判断，多期一起看才有意义（table.mjs）。\n' + '\n'.join(rows), data)
+          '只列事件不下结论：哪一个是原因要人判断，多期一起看才有意义。\n' + '\n'.join(rows), data)
 
 
 def open_events(events, sec=2.0):
@@ -1208,6 +1404,7 @@ FIX_HINTS = {
     'open.rule2': '第 0 帧就要有够大的字：字高至少视频宽的 4%（6% 以上更稳），第一句不超过 10 个字，别逐字打出来',
     'open.rule4': '竖屏上半屏从第 0 帧起挂一句第二人称的问题，放在顶栏 8% 以下，挂到标题出来',
     'open.rule5': '8 秒内的字幕里给一个带人数或年份的数字',
+    'open.read': '前 2 秒只留一句要读的话（≤ 18 字），把它放成全屏最大的字；标签、配方表、小字说明往后挪',
     'black': '片中黑场：多半是两个镜头之间没接上（前一个结束早了、后一个开始晚了），把时间表里的起止帧接上',
     'static': '画面停住 1 秒以上：加一点慢推、粒子或者让下一个元素提前进场',
     'flash': '闪烁太快：把闪白 / 硬切拉开到 1 秒 3 次以内，或者缩小闪的面积、降低亮度差',
@@ -1221,6 +1418,8 @@ FIX_HINTS = {
     'audio.jump': '突然变响：把这一处的音效 / 配乐音量压下来，或者前面做个渐强',
     'audio.silence': '片中静音：检查配乐是不是提前结束、段落之间漏了衔接；故意留白就在配置里忽略',
     'audio.open': '开头没声音：第 0 帧就进配乐或音效',
+    'end.ask': '片尾最后一屏放一个观众能一句话回答的问题（「你会选哪个？」），停 ≥ 2 秒再收；收尾的淡出 / 黑场挪到问句之后，或者把问句往前提',
+    'text.glyphs': '字体里没有的字换成 SVG 图形（对勾叉号用素材库的 Check / Cross），或者换成字体里有的字（→ 改「到」、≈ 改「约」）；确实要用就给这段字加一个有这个字的字体',
     'audio.sfx': '音效听不见：加音量，或者让开配乐的频段（同一时刻压一下配乐），或者挪开前一个音效',
     'mono': '外放会抵消：检查加宽效果、反相的音效或立体声混响，换成单声道兼容的版本',
     'spec': '上传规格：按 video_lint/specs.json 里推荐的编码、帧率、分辨率重新导出',
@@ -1244,6 +1443,9 @@ def write_fix(out, checks, video, fps):
             md.append(f'   - 位置：`{where_text(w, fps)}`')
         if c.get('fix'):
             md.append(f'   - 改法：{c["fix"]}')
+        plan = c['data'].get('fixPlan') if isinstance(c.get('data'), dict) else None
+        for x in plan or []:
+            md.append(f'     - {x}')
     md += ['', '改完重新导出（或渲小样），再跑一遍并和这一版比：', '', '```bash', f'video-lint <新成片> --compare {out / "report.json"}', '```',
            '', '`compare` 那一项列出修好了、新出现、还在的问题；没有「新出现」、也没有 ✗ 就算这一轮改完了。']
     (out / 'fix.md').write_text('\n'.join(md), encoding='utf-8')
@@ -1264,8 +1466,10 @@ def _check_ranges(c, sc, fps):
         if cid == 'open.rule5' and sc.get('captions'):  # 8 秒内没有数字：改的是字幕稿
             caps = [x for x in sc['captions'] if x['from'] < 8 * fps] or sc['captions'][:1]
             return [(caps[0]['from'], caps[-1]['to'], caps[0].get('source'))]
-        if cid.startswith('open.rule'):
+        if cid.startswith('open.rule') or cid == 'open.read':
             return [(0, two, None)]
+        if cid == 'end.ask':
+            return [(d['from'], d['to'], d.get('source'))]
         if cid == 'open.black':
             return [(d['frames'][0], d['frames'][-1], None)]
         if cid in ('black', 'static'):
@@ -1285,7 +1489,10 @@ def _check_ranges(c, sc, fps):
         if cid == 'audio.sfx':
             ev = d['events'] if isinstance(d, dict) else d
             ev = [x for x in ev if x.get('smr', -99) < -10 and x.get('smrHi', -99) < -10] if isinstance(d, dict) else ev
-            return [(x['frame'], x['frame'] + int(0.3 * fps), by_frame(sc.get('sfx', []), x['frame'])) for x in ev]
+            def loc(x):
+                src = by_frame(sc.get('sfx', []), x['frame'])
+                return {**src, 'what': f'{x["name"]} 要 +{x["needDb"]:.0f} dB'} if src and x.get('needDb') else src
+            return [(x['frame'], x['frame'] + int(0.3 * fps), loc(x)) for x in ev]
         if cid == 'captions.speed':
             return [(a, b, by_frame(sc.get('captions', []), a)) for a, b in d['at']]
         if cid == 'audio.jump':
@@ -1308,6 +1515,11 @@ def locate_checks(checks, sc, fps):
     root = sc.get('root')
     for c in checks:
         if c['level'] not in ('fail', 'warn'):
+            continue
+        if c['id'] == 'text.glyphs' and c.get('data'):
+            # 缺字直接指到写这个字的源码行，和帧无关
+            c['where'] = [{'file': w['file'], 'line': w['line'], 'what': f'「{m["char"]}」缺字', 'count': 1, 'static': True,
+                           **({'path': str(Path(root) / w['file'])} if root else {})} for m in c['data']['missing'] for w in m['where']][:8]
             continue
         found = {}
 
@@ -1347,7 +1559,7 @@ def locate_checks(checks, sc, fps):
 
 def where_text(w, fps):
     loc = f'{w["file"]}:{w["line"]}' if w.get('line') else w['file']
-    if w.get('cover'):
+    if w.get('cover') or w.get('static'):
         return f'{loc}（{w.get("what", "封面组件")}）'
     span = f'第 {w["from"]} 帧' if w['from'] == w['to'] else f'第 {w["from"]}–{w["to"]} 帧'
     tm = w.get('timing')
@@ -1408,6 +1620,103 @@ document.querySelectorAll('.filters input').forEach(b=>b.onchange=()=>{{const on
 
 
 # —— 项目配置文件 .video-lint.toml ——
+# —— 前置检查（--pre）：不要成片，只看旁注（字幕 / timeline / 音效表）和源码，几秒出结果 ——
+# 规则和文案都是上面成片检查的同一批函数，这里只是不传画面数据。
+# 能挡住提交的（vitest 里新期数会挂）：任何 ✗，加上缺字 ⚠（成片上一眼就是「这个字长得不一样」，没有理由留着）。
+# 其余 ⚠（片尾没问句、第一句太长……）是风格建议，只报不挂。
+PRE_BLOCK_WARN = {'text.glyphs'}
+PRE_CHECKS = ('text.glyphs', 'captions.speed', 'end.ask', 'open.rule2', 'open.rule5', 'beats.cuts')
+
+
+def _glyphs_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('video_lint_glyphs', Path(__file__).with_name('glyphs.py'))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def pre_checks(sc, g=None, glyphs_mod=None):
+    """一期的前置检查，返回 Report。g = glyphs.py 的结果；不给就当场静态查（要有 fontTools）"""
+    r = Report()
+    fps = sc.get('fps') or 30
+    caps = [c for c in sc.get('captions') or [] if c.get('text', '').strip()]
+    n = sc.get('durationFrames') or max((c['to'] for c in caps), default=0)
+    for note in sc.get('notes', []):
+        r.add('sidecar.note', 'info', '旁注', note)
+    if not sc.get('durationFrames'):
+        r.add('meta', 'info', '旁注里没有片长', '按最后一句字幕的结束帧算，「字幕比成片长」没法查')
+    if g is None:
+        try:
+            g = (glyphs_mod or _glyphs_module()).check(sc['id'])
+        except Exception as e:  # noqa: BLE001 没装 fontTools 也照样出别的检查
+            g = {'status': 'skip', 'reason': f'glyphs.py 出错：{e}'}
+    glyph_check(r, g)
+    if sc.get('captions'):
+        reading_speed_check(r, sc['captions'], fps)
+    end_ask(r, sc, None, None, fps, n)
+    add_open_rows(r, caption_open_rules(sc, fps))
+    shots = sc.get('shots') or []
+    starts = sorted({s['from'] for s in shots if 0 < s['from'] < n})
+    beats = (sc.get('beats') or {}).get('times')
+    if beats and starts:
+        cuts_on_beats(r, starts, beats, (sc.get('beats') or {}).get('source', '旁注'), fps, shots, '镜头起点',
+                      '前置检查把每个镜头起点当一处硬切；叠化、光点接力这类转场成片里不算硬切，所以这里最多报 ⚠，以成片检查为准。')
+        if r.checks[-1]['level'] == 'fail':
+            r.checks[-1]['level'] = 'warn'  # 样片：4 个人物段靠光点接力过渡，起点都不在拍上，成片里只有 1 处真硬切且在拍上
+    elif starts:
+        r.add('beats.cuts', 'info', f'{len(starts)} 个镜头起点，旁注里没有拍子网格可比', 'timeline.ts 里没有 BEAT / BAR；成片检查会从音频估拍子')
+    else:
+        r.add('beats.cuts', 'info', '旁注里没有镜头表，卡拍要成片查', '口播期没有 timeline.ts；成片检查从画面找硬切、从音频估拍子')
+    locate_checks(r.checks, sc, fps)
+    for c in r.checks:
+        if c['level'] in ('fail', 'warn') and (h := fix_hint(c['id'])):
+            c['fix'] = h
+    return r
+
+
+def pre_result(sc, r):
+    order = {'fail': 0, 'warn': 1, 'skip': 2, 'pass': 3, 'info': 4}
+    summary = {k: r.count(k) for k in order}
+    status = 'fail' if summary['fail'] else 'unmeasured' if summary['skip'] else 'pass'
+    blocking = [c['id'] for c in r.checks if c['level'] == 'fail' or (c['level'] == 'warn' and c['id'] in PRE_BLOCK_WARN)]
+    return {'id': sc.get('id'), 'status': status, 'summary': summary, 'blocking': blocking, 'checks': r.checks}
+
+
+def pre_main(a):
+    """--pre：--sidecar 给一期的旁注，或者一个旁注数组（pre.mjs 一次查很多期）"""
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if not a.sidecar:
+        sys.exit('--pre 要配 --sidecar（node scripts/video-lint/sidecar.mjs <期> 生成，或者直接用 pre.mjs）')
+    data = json.loads(Path(a.sidecar).read_text(encoding='utf-8'))
+    many = isinstance(data, list)
+    g = json.loads(Path(a.glyphs).read_text(encoding='utf-8')) if a.glyphs and not many else None
+    if a.captions and not many:
+        data['captions'] = parse_captions(a.captions, data.get('fps') or 30)
+    mod = None
+    try:
+        mod = _glyphs_module()
+    except Exception:  # noqa: BLE001
+        pass
+    results = []
+    for sc in (data if many else [data]):
+        res = pre_result(sc, pre_checks(sc, g, mod))
+        results.append(res)
+        s = res['summary']
+        if a.quiet and not any(c['level'] in ('fail', 'warn') for c in res['checks']):
+            continue
+        print(f'{res["id"]}：{s["fail"]} 个问题、{s["warn"]} 个提醒、{s["pass"]} 项通过' + (f'、{s["skip"]} 项没法查' if s['skip'] else '') + (f'（挡提交：{"、".join(res["blocking"])}）' if res['blocking'] else ''))
+        for c in res['checks']:
+            if c['level'] in ('fail', 'warn', 'skip'):
+                print(f'  {ICON[c["level"]]} {c["title"]}')
+                for w in c.get('where', [])[:2]:
+                    print(f'      → {where_text(w, sc.get("fps") or 30)}')
+    if a.json:
+        Path(a.json).write_text(json.dumps({'tool': 'video-lint', 'version': VERSION, 'mode': 'pre', 'results': results}, ensure_ascii=False, indent=1), encoding='utf-8')
+    sys.exit(2 if a.strict and any(x['blocking'] for x in results) else 0)
+
+
 CONFIG_NAME = '.video-lint.toml'
 # 配置文件里能写的键，和命令行同名（短横线换成下划线）；路径相对配置文件所在目录
 CONFIG_KEYS = {'compare', 'platform', 'lufs', 'loud', 'strict', 'no_ocr', 'no_flash', 'captions', 'sidecar', 'sfx_audio', 'out'}
@@ -1510,18 +1819,25 @@ def main():
     ap.add_argument('--config', help=f'配置文件；不给就从视频所在目录往上找 {CONFIG_NAME}')
     ap.add_argument('--out')
     ap.add_argument('--loud', help='要检查「有没有被配乐盖住」的音效名（逗号分隔，按子串匹配）')
-    ap.add_argument('--lufs', type=float, help='整片响度目标（±1 以内算合格）。各风格不同：黑金 / 战术屏 −15.5、连线星图 −14、人生曲线 −10.8、口播 −16、暖纸 −19；不给就只记录')
+    ap.add_argument('--lufs', type=float, help='整片响度目标（±1 以内算合格）。常见目标：流媒体平台约 −14、EBU R128 广播 −23；不给就只记录')
     ap.add_argument('--strict', action='store_true', help='按整体状态给退出码：通过 0、有问题 2、有该查但查不了的项 3（1 留给脚本自己出错）')
     ap.add_argument('--platform', choices=['douyin', 'tiktok', 'reels', 'shorts', 'none'], help='竖屏联系表叠哪个平台的界面，默认取旁注的 platform（没有就是 douyin）')
     ap.add_argument('--sfx-audio', help='只有音效的分轨（wav，或者「无配乐仅音效」版 mp4）；有它就用音效 / 配乐能量比判断听不听得见')
-    ap.add_argument('--text-dir',help='文字层 PNG 目录（textlayer.mjs 的输出），有它才自动查遮挡区和出画')
+    ap.add_argument('--text-dir',help='文字层 PNG 目录（例如 Remotion 适配器渲的），有它才自动查遮挡区和出画')
     ap.add_argument('--captions', help='字幕文件（.srt / .vtt / .ass），用来查阅读速度、开头第一句；会覆盖旁注里的字幕')
     ap.add_argument('--compare', help='上一版的 report.json（或报告目录）：列出修好了、新出现、还在的问题')
+    ap.add_argument('--glyphs', help='glyphs.py --json 的结果：源码里的字在字体里有没有（适配器生成）')
+    ap.add_argument('--font', action='append', help='字幕用的字体文件（可以给多次）：查字幕里有没有字体里没有、会换成系统字体的字（要装 fonttools）')
     ap.add_argument('--no-flash', action='store_true', help='不做闪烁安全检查（WCAG 2.3.1）')
     ap.add_argument('--no-ocr', action='store_true', help='没有文字层时也不用 OCR 找字')
-    ap.add_argument('--text-failed', help='（run.mjs 用）文字层渲染失败的原因')
+    ap.add_argument('--text-failed', help='（适配器用）文字层渲染失败的原因')
     ap.add_argument('--frames', help='另外抽这几帧拼成 frames.jpg（每行 4 格），看动画过程用：120,135=中段,150')
+    ap.add_argument('--pre', action='store_true', help='前置检查：不要成片，只看 --sidecar 的旁注和源码（缺字、字幕阅读速度、片尾问句、开头规则 2 / 5、镜头起点卡拍）；pre.mjs 调它')
+    ap.add_argument('--json', help='（--pre）结果写进这个 JSON 文件')
+    ap.add_argument('--quiet', action='store_true', help='（--pre）只打印有问题或提醒的期数')
     a = ap.parse_args()
+    if a.pre:
+        return pre_main(a)
     if not a.video and not a.cover:
         ap.error('要给成片，或者至少一个 --cover')
     cfg_path = find_config(a.video or a.cover[0], a.config)
@@ -1565,7 +1881,7 @@ def main():
     if np.percentile(f0, 99.9) < BLACK_P995:
         r.add('open.frame0', 'fail', '第 0 帧是黑屏', f'第一个有画面的帧是第 {first_visible} 帧（{(first_visible or 0) / fps:.2f} 秒）。刷到时看到的就是这一帧，黑屏会直接划走。', {'firstVisible': first_visible})
     elif visible < 0.005:
-        # ep52 的第 0 帧就是这样：只有背景光晕，2 秒跳出 40%
+        # 样片 的第 0 帧就是这样：只有背景光晕，2 秒跳出 40%
         r.add('open.frame0', 'fail', '第 0 帧几乎是空画面', f'亮于 60 的像素只占 {visible:.2%}。刷到时看到的就是这一帧，第 0 帧要给完整画面。', {'visible': visible})
     elif mean[0] < 0.4 * settle:
         r.add('open.frame0', 'warn', '第 0 帧明显比后面暗（淡入开场）', f'第 0 帧平均亮度 {mean[0]:.1f}，0.5–2 秒的中位数 {settle:.1f}', {'mean0': float(mean[0]), 'settle': settle})
@@ -1590,6 +1906,7 @@ def main():
         r.add('black', 'info', '只有片尾黑场', f'{blacks[-1][0] / fps:.2f} 秒起')
     else:
         r.add('black', 'pass', '没有黑场')
+    end_feat = end_ask(r, sc, mean, p995, fps, n)
     # 黑场本身也不动：和黑场重叠的静止段只算黑场，不重复报
     all_black = runs(p995 < BLACK_P995, 1)
     stills = [(s, e) for s, e in runs(diff < STATIC_DIFF, int(fps)) if not any(bs < e and s < be for bs, be in all_black)]
@@ -1653,21 +1970,7 @@ def main():
         except Exception as e:  # noqa: BLE001 没装 librosa 也照样出其它检查
             r.add('beats', 'info', '没有拍子网格', f'旁注里没有 beats，音频估计也失败了：{e}')
     if beats and cuts:
-        bt = np.array(beats)
-        period = float(np.median(np.diff(bt))) if len(bt) > 1 else 0.5
-        rows, off = [], []
-        for c in cuts:
-            t = c / fps
-            o = (t - bt[np.abs(bt - t).argmin()]) * fps
-            half = abs(((t - bt[0]) / (period / 2)) - round((t - bt[0]) / (period / 2))) * (period / 2) * fps
-            if abs(o) > 1.5:
-                off.append(c)
-                rows.append(f'第 {c} 帧（{t:.2f} 秒，{shot_at(sc.get("shots", []), c) or "—"}）偏 {o:+.1f} 帧' + ('，落在半拍上' if half <= 1.5 else ''))
-        level = 'pass' if not off else 'warn' if len(off) <= max(2, len(cuts) // 4) else 'fail'
-        if level == 'fail' and grid_src.startswith('由音频估计'):
-            level = 'warn'  # 音频估的网格拍长有误差，越往后漂得越多（ep61：估成 0.464 秒，实际 0.4525），不够判 ✗
-        r.add('beats.cuts', level, f'硬切卡拍：{len(cuts) - len(off)} / {len(cuts)} 处在拍点 ±1.5 帧内',
-              f'拍子来源：{grid_src}，拍长 {period:.3f} 秒。' + ('不在拍上的：\n' + '\n'.join(f'  - {x}' for x in rows) if rows else ''), {'cuts': cuts, 'offBeat': off})
+        cuts_on_beats(r, cuts, beats, grid_src, fps, sc.get('shots', []))
     elif cuts:
         r.add('beats.cuts', 'skip', f'检测到 {len(cuts)} 处硬切，没有拍子网格可比', '旁注里没有 beats，也没能从音频估出来', {'cuts': cuts})
     else:
@@ -1706,7 +2009,7 @@ def main():
             if not (rise >= 4 or rise_hi >= 6):
                 weak.append({'name': s['name'], 'frame': s['frame'], 'volume': s.get('volume'), 'rise': round(rise, 1), 'riseHi': round(rise_hi, 1)})
         if checked:
-            # 这条规则是在黑金 / 战术屏两种风格上校准的；音效正好落在配乐重拍上时，「前一刻」也很响，会误报。没指定 --loud 就只当参考
+            # 这条规则是在作者两种卡配乐的风格上校准的；音效正好落在配乐重拍上时，「前一刻」也很响，会误报。没指定 --loud 就只当参考
             lv = ('warn' if weak else 'pass') if a.loud else 'info'
             r.add('audio.sfx', lv, f'要听得见的音效：{checked - len(weak)} / {checked} 处比前一刻明显高出' + ('' if a.loud else '（默认清单，仅供参考）'),
                   '标准：全频高出 ≥ 4 dB，或 1.2–5 kHz 高出 ≥ 6 dB。' +('偏弱的（加音量，或挪开前面的音效）：\n' + '\n'.join(f'  - {w["name"]} @ {w["frame"] / fps:.2f} 秒（音量 {w["volume"]}）：全频 {w["rise"]:+} dB，1.2–5 kHz {w["riseHi"]:+} dB' for w in weak) if weak else ''), weak)
@@ -1751,6 +2054,10 @@ def main():
         no_text_source = True
     if boxes:
         contrast_check(r, video, boxes, fps, out, boxes_from_ocr)
+    if a.glyphs and Path(a.glyphs).exists():
+        glyph_check(r, json.loads(Path(a.glyphs).read_text(encoding='utf-8')))
+    elif a.font and sc.get('captions'):
+        glyph_check(r, caption_glyphs(sc['captions'], a.font, Path(a.captions).name if a.captions else '旁注字幕'))
     if no_text_source:
         r.add('text', 'info', '没有文字位置数据，遮挡区只画框给人看', '装上 rapidocr-onnxruntime 会自动用 OCR 找字；也可以传 --text-dir（所有文字渲成纯品红的同帧 PNG）')
     ims = extract_frames(video, want, tile_w, out)
@@ -1778,12 +2085,12 @@ def main():
     extract_frames(video, [0], P['width'], out)[0].save(out / 'frame0.jpg', quality=90)
     images['frame0'] = str(out / 'frame0.jpg')
     draw_curve(mean, diff, fps, sc, cuts, out / 'curve.png')
-    # 给跨期汇总表（table.mjs）用的画面特征
+    # 给跨期汇总表用的画面特征
     caps = sc.get('captions') or []
     features = {'durationSec': round(n / fps, 2), 'frame0Visible': round(visible, 4), 'firstVisibleFrame': first_visible,
                 'firstCaptionFrame': caps[0]['from'] if caps else None,
                 'openMotionRatio': round(float(diff[1:int(2 * fps)].mean()) / max(float(np.median(diff[1:])), 1e-3), 2) if n > 4 * fps else None,
-                'portrait': portrait, **open_feat, **open_events(events)}
+                'portrait': portrait, **open_feat, **open_events(events), **end_feat}
     images['curve'] = str(out / 'curve.png')
 
     if a.cover:

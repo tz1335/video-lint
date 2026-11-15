@@ -84,6 +84,31 @@ def test_merge_lines_joins_pieces_of_one_line_only():
     assert lint.merge_lines([a, b, c, d]) == [[0.1, 0.5, 0.6, 0.535], d, c]
 
 
+def test_open_reading_rule7():
+    P, fps = {'width': 1080, 'height': 1920}, 30
+    h = lambda s: s * 1080 / 1920  # 字高 ÷ 视频宽 → 行框高（画面高的比例）
+    row = lambda y, n, s: [0.05, y, 0.05 + n * s, y + h(s)]  # n 个字、字高 s 的一行
+    hook = row(0.2, 7, 0.07)
+    r = lint.Report()
+    feat = lint.open_reading(r, {0: [hook], 45: [hook]}, fps, P)
+    assert r.checks[-1]['level'] == 'pass' and feat['openTextChars'] == 7 and feat['openLongLineChars'] == 7
+
+    # 30 字：超过 2 秒阅读量 18，没到 3 倍 → 只记录；年份刻度那种 1% 的小字不算
+    ticks = row(0.9, 30, 0.01)
+    r = lint.Report()
+    feat = lint.open_reading(r, {0: [row(0.1 + i * 0.05, 10, 0.04) for i in range(3)] + [ticks]}, fps, P)
+    assert feat['openTextChars'] == 30 and r.checks[-1]['level'] == 'info'
+
+    # 一墙字（样片 那种）：6 行 × 10 字 = 60 > 54 → ⚠
+    r = lint.Report()
+    lint.open_reading(r, {15: [row(0.05 + i * 0.03, 10, 0.03) for i in range(6)]}, fps, P)
+    assert r.checks[-1]['level'] == 'warn' and '一墙字' in r.checks[-1]['title']
+
+    r = lint.Report()
+    assert lint.open_reading(r, {0: [ticks]}, fps, P)['openTextChars'] == 0 and r.checks[-1]['level'] == 'info'
+    assert lint.open_reading(lint.Report(), {}, fps, P)['openTextChars'] is None
+
+
 def test_magenta_matches_dimmed_magenta_not_gold_or_gray():
     px = np.array([[[255, 0, 255], [110, 20, 110], [230, 180, 60], [128, 128, 128]]], np.uint8)
     assert lint.magenta(px).tolist() == [[True, True, False, False]]
@@ -557,6 +582,7 @@ def test_fix_hints_and_fix_md(tmp_path):
     assert r['images']['fix'].endswith('fix.md')
 
 
+@pytest.mark.skipif(not _has_mcp(), reason='没装 mcp')
 def test_mcp_verify_fix(tmp_path):
     try:
         from video_lint import mcp_server
